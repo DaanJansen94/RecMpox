@@ -18,6 +18,8 @@ RecMpox is a command-line tool that **flags potential recombination events** in 
 
 ⚠️ **Note**: RecMpox is primarily designed to investigate potential recombination between viruses circulating in sustained human outbreaks (for example, SH2017, SH2023b, and SH2024a). The reference genomes provided by default in the tool correspond to these sustained outbreak lineages. When applying RecMpox outside this context, it is crucial to select reference genomes that are genetically close to your consensus sequences. Using distant or poorly matched references can reduce the interpretability of diagnostic SNPs and may lead to misleading recombinant signals.
 
+🔴 **Caution — Intra-clade comparisons**: When comparing within a clade, set the threshold higher than the default. Intra-clade comparisons yield far fewer diagnostic SNPs (e.g. as low as ~120 between Ia and Ib), meaning each individual SNP carries more weight and small percentages can arise from convergent evolution rather than true recombination. We recommend a minimum threshold of **20%** (`-m 20`) for intra-clade recombinant screening.
+
 ## Installation
 
 ### Prerequisites
