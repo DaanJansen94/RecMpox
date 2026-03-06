@@ -458,17 +458,58 @@ def _write_indel_regions_side_by_side(
             f.write("\n")
 
 
-def _snp_positions_svg(positions: List[int], genome_length: int, width_units: int = 1000, height: int = 50) -> str:
-    """Build an SVG showing diagnostic SNP positions along the genome; each tick has a title for hover."""
+def _snp_positions_svg(positions: List[int], genome_length: int, width_units: int = 1000, height: int = 44) -> str:
+    """Build an SVG showing diagnostic SNP positions along the genome; each tick has a title for hover.
+    kbp scale marks and SNP ticks are drawn below the baseline, labels at the bottom.
+    """
     if genome_length <= 0 or not positions:
         return ""
-    y_line = height // 2
-    y_tick_bottom = y_line + 12
-    hit_width = max(4, width_units // 80)  # wider hover target so tooltip is easy to trigger
+    y_line = 6           # horizontal baseline near the top
+    y_kbp_tick = 16      # bottom of kbp tick (10 px below baseline)
+    y_kbp_label = 30     # kbp label baseline (below the tick)
+    y_snp_bottom = 19    # bottom of SNP tick (13 px below baseline)
+
+    # Same adaptive step logic as _genome_ruler_html
+    step_bp = 10000
+    for s in [1000, 2000, 5000, 10000, 20000, 50000, 100000, 200000, 500000]:
+        if genome_length / s <= 20:
+            step_bp = s
+            break
+
+    hit_width = max(4, width_units // 80)
     parts = [
         f'<svg class="snp-positions-svg" viewBox="0 0 {width_units} {height}" preserveAspectRatio="xMidYMid meet" style="max-width:100%; height:auto;">',
         f'<line x1="0" y1="{y_line}" x2="{width_units}" y2="{y_line}" stroke="#333" stroke-width="1.5"/>',
     ]
+
+    # kbp scale marks (downward from baseline)
+    kbp_pos = 0
+    while kbp_pos <= genome_length:
+        x = (kbp_pos / genome_length) * width_units
+        label = "0" if kbp_pos == 0 else f"{kbp_pos // 1000}k"
+        parts.append(
+            f'<line x1="{x:.1f}" y1="{y_line}" x2="{x:.1f}" y2="{y_kbp_tick}"'
+            f' stroke="#adb5bd" stroke-width="0.8" pointer-events="none"/>'
+        )
+        anchor = "start" if kbp_pos == 0 else "middle"
+        parts.append(
+            f'<text x="{x:.1f}" y="{y_kbp_label}" font-size="9" fill="#888"'
+            f' text-anchor="{anchor}">{label}</text>'
+        )
+        kbp_pos += step_bp
+    # Final tick at exact genome end if not already aligned
+    if genome_length % step_bp != 0:
+        x_end = width_units
+        parts.append(
+            f'<line x1="{x_end}" y1="{y_line}" x2="{x_end}" y2="{y_kbp_tick}"'
+            f' stroke="#adb5bd" stroke-width="0.8" pointer-events="none"/>'
+        )
+        parts.append(
+            f'<text x="{x_end}" y="{y_kbp_label}" font-size="9" fill="#888"'
+            f' text-anchor="end">{genome_length // 1000}k</text>'
+        )
+
+    # SNP ticks (downward from baseline)
     for pos in positions:
         x = (pos / genome_length) * width_units
         x = max(0, min(width_units, x))
@@ -476,12 +517,11 @@ def _snp_positions_svg(positions: List[int], genome_length: int, width_units: in
         rw = min(hit_width, width_units - rx)
         parts.append(
             f'<g><title>Position: {pos} bp</title>'
-            f'<rect x="{rx}" y="0" width="{rw}" height="{height}" fill="transparent" class="snp-tick-hit"/>'
-            f'<line x1="{x}" y1="{y_line}" x2="{x}" y2="{y_tick_bottom}" stroke="#667eea" stroke-width="1" pointer-events="none"/>'
+            f'<rect x="{rx:.2f}" y="0" width="{rw:.2f}" height="{height}" fill="transparent" class="snp-tick-hit"/>'
+            f'<line x1="{x:.2f}" y1="{y_line}" x2="{x:.2f}" y2="{y_snp_bottom}" stroke="#667eea" stroke-width="1" pointer-events="none"/>'
             f'</g>'
         )
-    parts.append(f'<text x="0" y="{height - 4}" font-size="10" fill="#495057">0</text>')
-    parts.append(f'<text x="{width_units - 28}" y="{height - 4}" font-size="10" fill="#495057" text-anchor="end">{genome_length}</text>')
+
     parts.append("</svg>")
     return "\n".join(parts)
 
@@ -840,7 +880,11 @@ def _write_results_html(
         )
         snp_positions_section_html = (
             '<details class="collapsible-section" open id="snpPositionsSection">'
-            '<summary><h2>Diagnostic SNP positions between reference genomes</h2></summary>'
+            '<summary><h2>Diagnostic SNP positions between reference genomes</h2>'
+            '<span style="display:flex;gap:6px;margin-left:auto;flex-shrink:0;">'
+            '<button class="pdf-btn" style="margin-left:0" onclick="event.stopPropagation();exportChartPng(\'chartSnpPositions\',\'snp_positions_histogram.png\')">&#8595; Histogram PNG</button>'
+            '<button class="pdf-btn" style="margin-left:0" onclick="event.stopPropagation();exportSnpRulerSvg()">&#8595; Ruler SVG</button>'
+            '</span></summary>'
             '<div class="section-inner chart-section">'
             '<p class="threshold-note"><strong>{n_snps} diagnostic SNPs.</strong> Density of diagnostic SNPs along the reference (alignment coordinates). Use this to interpret where recombination breakpoints may fall. Squirrel always builds alignments relative to reference NC_003310 (Clade I) or NC_063383 (Clade II), not the refs you specified.</p>'
             '<div class="snp-positions-wrapper"><div class="chart-container" style="height:220px;"><canvas id="chartSnpPositions"></canvas></div></div>'
@@ -861,6 +905,7 @@ def _write_results_html(
 <meta name="viewport" content="width=device-width, initial-scale=1.0">
 <title>RecMpox Results</title>
 <script src="https://cdn.jsdelivr.net/npm/chart.js@4.4.0/dist/chart.umd.min.js"></script>
+<script src="https://cdn.jsdelivr.net/npm/xlsx@0.18.5/dist/xlsx.full.min.js"></script>
 <style>
 * {{ margin: 0; padding: 0; box-sizing: border-box; }}
 body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif; background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); padding: 40px 20px; min-height: 100vh; }}
@@ -925,8 +970,8 @@ tr.recombinant {{ }}
 .rec-sites-sample-id {{ font-size: 0.95em; font-weight: 600; color: #333; width: 300px; min-width: 300px; max-width: 300px; overflow: visible; white-space: normal; word-break: break-word; flex-shrink: 0; }}
 .strip-cell {{ flex: 1 0 0; min-width: 0; overflow-x: auto; overflow-y: hidden; border-radius: 4px; border: 1px solid #e9ecef; -webkit-overflow-scrolling: touch; }}
 .strip-genome {{ position: relative; width: 100%; height: 24px; min-width: 200px; border-radius: 4px; overflow: hidden; background: #e9ecef; }}
-.strip-genome.breakpoints-strip {{ background: #ced4da; height: 32px; border-radius: 6px; box-shadow: inset 0 2px 6px rgba(0,0,0,0.13); }}
-.strip-genome.breakpoints-strip::after {{ content: ''; position: absolute; inset: 0; background: linear-gradient(to bottom, rgba(255,255,255,0.18) 0%, transparent 55%); pointer-events: none; z-index: 5; border-radius: inherit; }}
+.strip-genome.breakpoints-strip {{ background: linear-gradient(135deg, #c4d3e0 0%, #b6c8d7 60%, #bfcdd9 100%); height: 32px; border-radius: 6px; box-shadow: inset 0 2px 8px rgba(74,144,217,0.13), inset 0 -1px 3px rgba(0,0,0,0.07); }}
+.strip-genome.breakpoints-strip::after {{ content: ''; position: absolute; inset: 0; background: linear-gradient(to bottom, rgba(255,255,255,0.22) 0%, transparent 50%); pointer-events: none; z-index: 5; border-radius: inherit; }}
 .strip-segment {{ position: absolute; top: 0; height: 100%; width: 2px; transition: opacity 0.15s; }}
 .strip-segment:hover {{ opacity: 0.75; }}
 .strip-segment.ia {{ background: #4A90D9; }}
@@ -941,7 +986,7 @@ tr.recombinant {{ }}
 .strip-legend-ia {{ display: inline-block; width: 14px; height: 14px; background: #4A90D9; border-radius: 2px; }}
 .strip-legend-ib {{ display: inline-block; width: 14px; height: 14px; background: #E89B3C; border-radius: 2px; }}
 .strip-legend-other {{ display: inline-block; width: 14px; height: 14px; background: #95a5a6; border-radius: 2px; }}
-.strip-legend-gap {{ display: inline-block; width: 14px; height: 14px; background: #ced4da; border: 1px solid #adb5bd; border-radius: 2px; }}
+.strip-legend-gap {{ display: inline-block; width: 14px; height: 14px; background: linear-gradient(135deg, #c4d3e0, #b6c8d7); border: 1px solid #9fb8cc; border-radius: 2px; }}
 .strip-ruler {{ position: relative; width: 100%; height: 22px; min-width: 200px; margin-top: 3px; }}
 .ruler-tick {{ position: absolute; transform: translateX(-50%); font-size: 0.67em; font-weight: 500; color: #6c757d; white-space: nowrap; line-height: 1; padding-top: 6px; letter-spacing: 0.01em; }}
 .ruler-tick::before {{ content: ''; display: block; position: absolute; top: 0; left: 50%; transform: translateX(-50%); width: 1px; height: 5px; background: #adb5bd; }}
@@ -984,7 +1029,7 @@ tr.recombinant {{ }}
 {threshold_html}
 </div>
 <details class="collapsible-section" open>
-<summary><h2>Per-genome classification (recombinant genomes)</h2></summary>
+<summary><h2>Per-genome classification (recombinant genomes)</h2><button class="pdf-btn" onclick="event.stopPropagation();exportTableXlsx()">&#8595; Download XLSX</button></summary>
 <div class="section-inner table-section">
 <table id="t">
 <thead>
@@ -998,7 +1043,7 @@ tr.recombinant {{ }}
 </div>
 </details>
 <details class="collapsible-section" open>
-<summary><h2>Diagnostic SNPs per genome (stacked barplot)</h2></summary>
+<summary><h2>Diagnostic SNPs per genome (stacked barplot)</h2><button class="pdf-btn" onclick="event.stopPropagation();exportChartPng(\'chartBar\',\'diagnostic_snps_barplot.png\')">&#8595; Download PNG</button></summary>
 <div class="section-inner chart-section">
 <p class="threshold-note">Stacked percentage per genome: % {html_escape(ref1_label)} (blue), % {html_escape(ref2_label)} (purple), % other (gray).</p>
 <div class="chart-legend stacked-bar-legend">
@@ -1019,6 +1064,53 @@ tr.recombinant {{ }}
 </div>
 </div>
 <script>
+function exportChartPng(canvasId, filename) {{
+  var canvas = document.getElementById(canvasId);
+  if (!canvas) {{ alert('Chart not ready yet – please wait a moment and try again.'); return; }}
+  var a = document.createElement('a');
+  a.href = canvas.toDataURL('image/png');
+  a.download = filename;
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+}}
+
+function exportSnpRulerSvg() {{
+  var svg = document.querySelector('.snp-positions-svg');
+  if (!svg) {{ alert('SVG ruler not found.'); return; }}
+  var serializer = new XMLSerializer();
+  var svgStr = serializer.serializeToString(svg);
+  var blob = new Blob([svgStr], {{ type: 'image/svg+xml;charset=utf-8' }});
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = 'diagnostic_snp_positions_ruler.svg';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(a.href);
+}}
+
+function exportTableXlsx() {{
+  if (typeof XLSX === 'undefined') {{ alert('XLSX library not loaded.'); return; }}
+  var headers = [];
+  var thead = document.querySelector('#t thead tr:first-child');
+  if (!thead) return;
+  thead.querySelectorAll('th').forEach(function(th) {{
+    headers.push(th.textContent.trim().replace(/[\u2195\u2191\u2193\u25b2\u25bc]/g, '').trim());
+  }});
+  var tbody = document.querySelector('#t tbody');
+  var wsData = [headers];
+  Array.from(tbody.querySelectorAll('tr:not(.hidden)')).forEach(function(tr) {{
+    var row = [];
+    Array.from(tr.cells).forEach(function(td) {{
+      var val = td.textContent.trim();
+      var num = parseFloat(val);
+      row.push(isNaN(num) ? val : num);
+    }});
+    wsData.push(row);
+  }});
+  var ws = XLSX.utils.aoa_to_sheet(wsData);
+  var wb = XLSX.utils.book_new();
+  XLSX.utils.book_append_sheet(wb, ws, 'RecMpox Results');
+  XLSX.writeFile(wb, 'recmpox_results.xlsx');
+}}
+
 function escSvg(s) {{
   return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
 }}
@@ -1051,7 +1143,7 @@ function exportStripSvg(sectionId, containerId, figTitle, ref1Label, ref2Label) 
 
   var colorMap = {{ ia: '#4A90D9', ib: '#E89B3C', other: '#95a5a6' }};
   var isBp = !!container.querySelector('.breakpoints-strip');
-  var stripBg = isBp ? '#e2e7eb' : '#e9ecef';
+  var stripBg = isBp ? '#bfcdd9' : '#e9ecef';
 
   var s = [];
   s.push('<?xml version="1.0" encoding="UTF-8"?>');
@@ -1118,7 +1210,7 @@ function exportStripSvg(sectionId, containerId, figTitle, ref1Label, ref2Label) 
   if (!isBp) {{
     legItem(legX, '#95a5a6', 'other', false);
   }} else {{
-    legItem(legX, '#e2e7eb', 'predicted breakpoint region', true);
+    legItem(legX, '#bfcdd9', 'predicted breakpoint region (affected by ambiguous bases / poor coverage)', true);
   }}
 
   s.push('</svg>');
