@@ -509,6 +509,29 @@ def _snp_positions_histogram_bins(
     return labels, counts
 
 
+def _genome_ruler_html(genome_length: int, min_width: int) -> str:
+    """Return an HTML ruler div with kbp tick marks proportional to genome_length."""
+    if not genome_length:
+        return ""
+    # Pick a step size that gives 10–20 ticks
+    step_bp = 10000
+    for s in [1000, 2000, 5000, 10000, 20000, 50000, 100000, 200000, 500000]:
+        if genome_length / s <= 20:
+            step_bp = s
+            break
+    ticks = []
+    pos = 0
+    while pos <= genome_length:
+        pct = pos / genome_length * 100
+        label = "0" if pos == 0 else f"{pos // 1000}k"
+        ticks.append(f'<span class="ruler-tick" style="left:{pct:.2f}%">{label}</span>')
+        pos += step_bp
+    # Always include a tick at the genome end if not already there
+    if genome_length % step_bp != 0:
+        ticks.append(f'<span class="ruler-tick" style="left:100%">{genome_length // 1000}k</span>')
+    return f'<div class="strip-ruler" style="min-width:{min_width}px">{"".join(ticks)}</div>'
+
+
 def _write_results_html(
     out_path: Path,
     results: List[Dict[str, Any]],
@@ -649,8 +672,9 @@ def _write_results_html(
 
     # Diagnostic sites per sample: strip (genome position, color Ia/Ib/other) + table for ALL consensus genomes
     genome_length = results[0]["length"] if results else 0
+    _first_alle = next((r.get("allegiances", []) for r in results if r.get("allegiances")), [])
+    strip_min_w = max(600, len(_first_alle) * 2)
     rec_sites_html = ""
-    n_segments_for_strip = 0
     for ri, r in enumerate(results):
         sample_id = r.get("id", "")
         allegiances = r.get("allegiances", [])
@@ -658,20 +682,19 @@ def _write_results_html(
         if not allegiances:
             continue
         sorted_alle = sorted(allegiances, key=lambda x: x[0])
-        if not n_segments_for_strip:
-            n_segments_for_strip = len(sorted_alle)
-        strip_min_w = max(400, n_segments_for_strip * 2)
         strip_segments = ""
         for (pos, allegiance) in sorted_alle:
             cls = "ia" if allegiance == "ia" else ("ib" if allegiance == "ib" else "other")
             lbl = ref1_label if allegiance == "ia" else (ref2_label if allegiance == "ib" else "other")
-            strip_segments += f'<span class="strip-segment {cls}" title="{pos} {html_escape(lbl)}"></span>'
+            pct = pos / genome_length * 100 if genome_length else 0
+            strip_segments += f'<span class="strip-segment {cls}" title="{pos} bp – {html_escape(lbl)}" style="left:{pct:.3f}%"></span>'
         section_cls = "rec-sites-section" + (" recombinant" if rec_call == "potential recombinant" else "")
+        ruler_html = _genome_ruler_html(genome_length, strip_min_w)
         rec_sites_html += (
             f'<div class="{section_cls}" data-row="{ri}" data-recombinant="{html_escape(rec_call)}">'
             f'<div class="rec-sites-row">'
             f'<span class="rec-sites-sample-id" title="{html_escape(sample_id)}">{html_escape(sample_id)}</span>'
-            f'<div class="strip-cell"><div class="strip-genome" style="min-width:{strip_min_w}px" role="img" aria-label="Diagnostic sites along genome">{strip_segments}</div></div>'
+            f'<div class="strip-cell"><div class="strip-genome" style="min-width:{strip_min_w}px" role="img" aria-label="Diagnostic sites along genome">{strip_segments}</div>{ruler_html}</div>'
             f'</div>'
             f'<details class="rec-sites-details"><summary>Show diagnostic site table (by tract)</summary>'
             f'<p class="threshold-note">Tracts = consecutive diagnostic sites with same classification. One row per tract.</p>'
@@ -722,7 +745,8 @@ def _write_results_html(
             breakpoints: List[Tuple[int, int, str, str]] = []
             if allegiances:
                 runs, breakpoints = get_runs_and_breakpoints(
-                    allegiances, diagnostic_snp_positions, min_consecutive=min_consecutive
+                    allegiances, diagnostic_snp_positions, min_consecutive=min_consecutive,
+                    ignore_other=True,
                 )
             # Merge consecutive runs of the same clade (gaps = "other" ambiguous sites; treat as one tract)
             merged: List[Tuple[int, int, str, int]] = []
@@ -740,20 +764,16 @@ def _write_results_html(
                     merged_tracts[-1] = (merged_tracts[-1][0], end_pos, clade, merged_tracts[-1][3] + n_snps)
                 else:
                     merged_tracts.append((start_pos, end_pos, clade, n_snps))
+            bp_strip_min_w = max(600, genome_length // 150) if genome_length else 600
             strip_segments = ""
             for j, (start_pos, end_pos, clade, n_snps) in enumerate(merged_tracts):
                 cls = "ia" if clade == "ia" else "ib"
                 lbl = ref1_label if clade == "ia" else ref2_label
+                left_pct = start_pos / genome_length * 100 if genome_length else 0
+                width_pct = max(0.3, (end_pos - start_pos + 1) / genome_length * 100) if genome_length else 2
                 strip_segments += (
-                    f'<span class="strip-segment region-segment {cls}" title="{start_pos}–{end_pos} {html_escape(lbl)} ({n_snps} SNPs)" style="flex: {n_snps} 1 0;"></span>'
+                    f'<span class="strip-segment region-segment {cls}" title="{start_pos}–{end_pos} {html_escape(lbl)} ({n_snps} SNPs)" style="left:{left_pct:.3f}%; width:{width_pct:.3f}%;"></span>'
                 )
-                if j < len(merged_tracts) - 1:
-                    start_next = merged_tracts[j + 1][0]
-                    ca, cb = clade, merged_tracts[j + 1][2]
-                    lbl_a = ref1_label if ca == "ia" else ref2_label
-                    lbl_b = ref1_label if cb == "ia" else ref2_label
-                    bp_title = f"Breakpoint: {end_pos} → {start_next} ({lbl_a} → {lbl_b})"
-                    strip_segments += f'<span class="strip-segment breakpoint-marker" title="{html_escape(bp_title)}"></span>'
             n_tracts = len(merged_tracts)
             n_breakpoints = max(0, n_tracts - 1)
             section_cls = "rec-sites-section" + (" recombinant" if rec_call == "potential recombinant" else "")
@@ -767,8 +787,11 @@ def _write_results_html(
                 summary_text = "No recombination tracts (genome entirely one clade)"
                 details_content = '<p class="threshold-note">No recombination detected; genome is entirely one clade.</p>'
             else:
-                strip_min_w = max(400, (len(merged_tracts) + max(0, len(merged_tracts) - 1)) * 24)
-                strip_display = f'<div class="strip-genome breakpoints-strip" style="min-width:{strip_min_w}px" role="img" aria-label="Predicted regions and breakpoints">{strip_segments}</div>'
+                bp_ruler_html = _genome_ruler_html(genome_length, bp_strip_min_w)
+                strip_display = (
+                    f'<div class="strip-genome breakpoints-strip" style="min-width:{bp_strip_min_w}px" role="img" aria-label="Predicted regions and breakpoints">{strip_segments}</div>'
+                    + bp_ruler_html
+                )
                 summary_text = f"Show recombination tracts (Number of tracts: {n_tracts}, breakpoints: {n_breakpoints})"
                 details_content = (
                     f'<table class="rec-sites-table"><thead><tr><th>Tract #</th><th>Beginning of tract (bp)</th><th>End of tract (bp)</th><th>Clade</th></tr></thead><tbody>'
@@ -791,11 +814,11 @@ def _write_results_html(
         strip_ref2_name = ref2_label if ref2_label not in ("ref1", "ref2") else (ref2_spec or ref2_label)
         breakpoints_section_html = (
             '<details class="collapsible-section diagnostic-strips-chart" open id="breakpointsStripsSection">'
-            '<summary><h2>Recombination breakpoints per sample</h2></summary>'
+            '<summary><h2>Recombination tracts and predicted breakpoints per sample</h2></summary>'
             '<div class="section-inner chart-section">'
-            '<p class="threshold-note">Predicted recombination breakpoints within each genome. We show the beginning and end of each detected tract (first and last diagnostic SNP of that clade). The <strong>breakpoint lies in the region between</strong> the end of one tract and the start of the next; we cannot pinpoint its exact position because those regions have no diagnostic SNPs (genetically identical). Minimum consecutive diagnostic SNPs per tract: <strong>{min_consecutive}</strong>. <span id="breakpointsFilterCount" aria-live="polite"></span></p>'
-            '<p class="threshold-note">{ref1} (blue), {ref2} (orange), breakpoint (red bar).</p>'
-            '<div class="strip-legend"><span class="strip-legend-ia"></span> {ref1} &nbsp; <span class="strip-legend-ib"></span> {ref2} &nbsp; <span class="strip-legend-breakpoint"></span> breakpoint</div>'
+            '<p class="threshold-note">Each coloured tract spans from the <strong>first to the last diagnostic SNP</strong> unambiguously derived from that clade. The predicted breakpoint lies somewhere in the <strong>uncoloured gap</strong> between adjacent tracts — its exact position cannot be determined because those intervening regions lack clade-informative diagnostic SNPs. Minimum consecutive diagnostic SNPs per tract: <strong>{min_consecutive}</strong>. <span id="breakpointsFilterCount" aria-live="polite"></span></p>'
+            '<p class="threshold-note">{ref1} (blue), {ref2} (orange). Grey gaps = predicted breakpoint region (may be widened by ambiguous bases or poorly sequenced areas).</p>'
+            '<div class="strip-legend"><span class="strip-legend-ia"></span> {ref1} &nbsp; <span class="strip-legend-ib"></span> {ref2} &nbsp; <span class="strip-legend-gap"></span> predicted breakpoint region (affected by ambiguous bases / poor coverage)</div>'
             '<div class="strip-strips-container" id="breakpointsStripScrollWrapper">'
             '<div id="breakpointsStripsContainer">'
         ).format(ref1=html_escape(strip_ref1_name), ref2=html_escape(strip_ref2_name), min_consecutive=min_consecutive)
@@ -901,19 +924,27 @@ tr.recombinant {{ }}
 .rec-sites-row {{ display: flex; align-items: center; gap: 12px; flex-wrap: nowrap; min-width: 0; width: 100%; max-width: 100%; }}
 .rec-sites-sample-id {{ font-size: 0.95em; font-weight: 600; color: #333; width: 300px; min-width: 300px; max-width: 300px; overflow: visible; white-space: normal; word-break: break-word; flex-shrink: 0; }}
 .strip-cell {{ flex: 1 0 0; min-width: 0; overflow-x: auto; overflow-y: hidden; border-radius: 4px; border: 1px solid #e9ecef; -webkit-overflow-scrolling: touch; }}
-.strip-genome {{ display: flex; flex-wrap: nowrap; height: 24px; min-width: 200px; border-radius: 4px; overflow: hidden; }}
-.strip-segment {{ flex: 1; min-width: 2px; transition: opacity 0.15s; }}
-.strip-segment:hover {{ opacity: 0.85; }}
+.strip-genome {{ position: relative; width: 100%; height: 24px; min-width: 200px; border-radius: 4px; overflow: hidden; background: #e9ecef; }}
+.strip-genome.breakpoints-strip {{ background: #ced4da; height: 32px; border-radius: 6px; box-shadow: inset 0 2px 6px rgba(0,0,0,0.13); }}
+.strip-genome.breakpoints-strip::after {{ content: ''; position: absolute; inset: 0; background: linear-gradient(to bottom, rgba(255,255,255,0.18) 0%, transparent 55%); pointer-events: none; z-index: 5; border-radius: inherit; }}
+.strip-segment {{ position: absolute; top: 0; height: 100%; width: 2px; transition: opacity 0.15s; }}
+.strip-segment:hover {{ opacity: 0.75; }}
 .strip-segment.ia {{ background: #4A90D9; }}
 .strip-segment.ib {{ background: #E89B3C; }}
 .strip-segment.other {{ background: #95a5a6; }}
+.strip-segment.region-segment {{ min-width: 4px; border-radius: 3px; }}
+.strip-segment.breakpoint-marker {{ width: 4px; background: #c0392b; transform: translateX(-50%); }}
+#breakpointsStripsContainer .rec-sites-section {{ background: linear-gradient(135deg, #fafbfc 0%, #f4f6f9 100%); border-left: 4px solid #dee2e6; box-shadow: 0 1px 4px rgba(0,0,0,0.05); transition: box-shadow 0.15s; }}
+#breakpointsStripsContainer .rec-sites-section.recombinant {{ border-left-color: #E89B3C; }}
+#breakpointsStripsContainer .rec-sites-section:hover {{ box-shadow: 0 3px 10px rgba(0,0,0,0.10); }}
 .strip-legend {{ display: flex; align-items: center; gap: 4px; flex-wrap: wrap; margin-bottom: 12px; font-size: 0.9em; color: #495057; }}
 .strip-legend-ia {{ display: inline-block; width: 14px; height: 14px; background: #4A90D9; border-radius: 2px; }}
 .strip-legend-ib {{ display: inline-block; width: 14px; height: 14px; background: #E89B3C; border-radius: 2px; }}
 .strip-legend-other {{ display: inline-block; width: 14px; height: 14px; background: #95a5a6; border-radius: 2px; }}
-.strip-legend-breakpoint {{ display: inline-block; width: 4px; height: 14px; background: #c0392b; border-radius: 1px; }}
-.strip-segment.breakpoint-marker {{ flex: none; width: 4px; min-width: 4px; background: #c0392b; }}
-.strip-genome.breakpoints-strip .strip-segment.region-segment {{ min-width: 8px; }}
+.strip-legend-gap {{ display: inline-block; width: 14px; height: 14px; background: #ced4da; border: 1px solid #adb5bd; border-radius: 2px; }}
+.strip-ruler {{ position: relative; width: 100%; height: 22px; min-width: 200px; margin-top: 3px; }}
+.ruler-tick {{ position: absolute; transform: translateX(-50%); font-size: 0.67em; font-weight: 500; color: #6c757d; white-space: nowrap; line-height: 1; padding-top: 6px; letter-spacing: 0.01em; }}
+.ruler-tick::before {{ content: ''; display: block; position: absolute; top: 0; left: 50%; transform: translateX(-50%); width: 1px; height: 5px; background: #adb5bd; }}
 .rec-sites-details {{ margin-top: 10px; font-size: 0.9em; }}
 .rec-sites-details summary {{ cursor: pointer; color: #667eea; font-weight: 500; }}
 .rec-sites-table {{ margin-top: 8px; border-collapse: collapse; font-size: 0.9em; max-height: 200px; overflow: auto; }}
@@ -1120,12 +1151,13 @@ tr.recombinant {{ }}
     }});
   }});
 
+  function truncId(id) {{ return id && id.length > 20 ? id.slice(0, 20) + "\u2026" : (id || ""); }}
   var chartBar = null;
   function updateChart() {{
     var visibleRows = rows.filter(function(r) {{ return !r.classList.contains("hidden"); }});
     var labels = visibleRows.map(function(r) {{
       var ri = parseInt(r.getAttribute("data-row"), 10);
-      return (data[ri] && data[ri].id) ? data[ri].id : "";
+      return truncId((data[ri] && data[ri].id) ? data[ri].id : "");
     }});
     var pct1 = visibleRows.map(function(r) {{
       var ri = parseInt(r.getAttribute("data-row"), 10);
@@ -1171,7 +1203,7 @@ tr.recombinant {{ }}
             }}
           }},
           scales: {{
-            x: {{ title: {{ display: true, text: "Accession" }}, ticks: {{ maxRotation: 45, minRotation: 45, autoSkip: false, font: {{ size: 11 }} }} }},
+            x: {{ title: {{ display: true, text: "Sample ID" }}, ticks: {{ maxRotation: 45, minRotation: 45, autoSkip: false, font: {{ size: 11 }} }} }},
             y: {{ title: {{ display: true, text: "Percentage (%)" }}, min: 0, max: 100, ticks: {{ stepSize: 20 }} }}
           }},
           plugins: {{ legend: {{ display: true, position: "top" }} }}

@@ -471,16 +471,26 @@ def get_runs_and_breakpoints(
     positions_allegiances: List[Tuple[int, str]],
     diagnostic_snp_positions: List[int],
     min_consecutive: int = 1,
+    ignore_other: bool = True,
 ) -> Tuple[List[Tuple[int, int, str, int]], List[Tuple[int, int, str, str]]]:
     """
-    Build runs of consecutive ia/ib along diagnostic SNPs; "other" (ambiguous) ends a run.
-    Only call a breakpoint when *both* the run before and the run after have >= min_consecutive SNPs.
-    If min_consecutive is 1, all runs are considered (no consecutive-SNP filtering). SNPs classified
-    as "other" are ignored for run boundaries.
+    Build runs of consecutive ia/ib along diagnostic SNPs.
+
+    When ignore_other=True (default): "other" positions (N, gap, ambiguous base) are
+    transparent to the run builder — a tract continues through them and only ends when
+    an actual opposing-clade SNP is encountered.  end_pos and n_snps reflect only the
+    clade-matching positions; "other" positions inside a tract are excluded from its
+    endpoints and SNP count.  This makes tracts robust to patchy coverage: a stretch of
+    N's inside an otherwise consistent Ia region will not split the tract.
+
+    When ignore_other=False: any "other" position ends the current run (original
+    behaviour — more conservative, breaks tracts at every ambiguous site).
+
+    A breakpoint is only called when *both* flanking runs have >= min_consecutive SNPs.
 
     Returns:
         runs: list of (start_pos, end_pos, clade, n_snps) with clade in ("ia", "ib").
-        breakpoints: list of (pos_after_break, start_pos_next_run, clade_before, clade_after).
+        breakpoints: list of (end_pos_before, start_pos_after, clade_before, clade_after).
     """
     snp_positions = set(diagnostic_snp_positions)
     # Keep only SNP positions, sorted by position
@@ -494,17 +504,24 @@ def get_runs_and_breakpoints(
         if a not in ("ia", "ib"):
             i += 1
             continue
+        current_clade = a
         start_pos = pos
+        last_clade_pos = pos  # last position that actually matched current_clade
         n_snps = 1
         i += 1
         while i < len(ordered):
             next_pos, next_a = ordered[i]
-            if next_a != a:
+            if next_a == current_clade:
+                last_clade_pos = next_pos
+                n_snps += 1
+                i += 1
+            elif next_a == "other" and ignore_other:
+                # Transparent: skip without updating last_clade_pos or n_snps
+                i += 1
+            else:
+                # Opposing clade (or "other" when ignore_other=False) → end this run
                 break
-            n_snps += 1
-            i += 1
-        end_pos = ordered[i - 1][0]
-        runs.append((start_pos, end_pos, a, n_snps))
+        runs.append((start_pos, last_clade_pos, current_clade, n_snps))
 
     breakpoints: List[Tuple[int, int, str, str]] = []
     for j in range(len(runs) - 1):
