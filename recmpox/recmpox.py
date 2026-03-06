@@ -485,6 +485,10 @@ def _snp_positions_svg(positions: List[int], genome_length: int, width_units: in
     # kbp scale marks (downward from baseline)
     kbp_pos = 0
     while kbp_pos <= genome_length:
+        # Skip regular ticks too close to the endpoint (would produce duplicate label)
+        if kbp_pos > 0 and (genome_length - kbp_pos) < step_bp * 0.6:
+            kbp_pos += step_bp
+            continue
         x = (kbp_pos / genome_length) * width_units
         label = "0" if kbp_pos == 0 else f"{kbp_pos // 1000}k"
         parts.append(
@@ -506,7 +510,7 @@ def _snp_positions_svg(positions: List[int], genome_length: int, width_units: in
         )
         parts.append(
             f'<text x="{x_end}" y="{y_kbp_label}" font-size="9" fill="#888"'
-            f' text-anchor="end">{genome_length // 1000}k</text>'
+            f' text-anchor="end">{genome_length:,}</text>'
         )
 
     # SNP ticks (downward from baseline)
@@ -564,11 +568,15 @@ def _genome_ruler_html(genome_length: int, min_width: int) -> str:
     while pos <= genome_length:
         pct = pos / genome_length * 100
         label = "0" if pos == 0 else f"{pos // 1000}k"
+        # Skip regular ticks that would crowd the endpoint label (within 60 % of one step)
+        if pos > 0 and (genome_length - pos) < step_bp * 0.6:
+            pos += step_bp
+            continue
         ticks.append(f'<span class="ruler-tick" style="left:{pct:.2f}%">{label}</span>')
         pos += step_bp
-    # Always include a tick at the genome end if not already there
+    # Always include a tick at the genome end if not already there, showing exact bp
     if genome_length % step_bp != 0:
-        ticks.append(f'<span class="ruler-tick" style="left:100%">{genome_length // 1000}k</span>')
+        ticks.append(f'<span class="ruler-tick" style="left:100%">{genome_length:,}</span>')
     return f'<div class="strip-ruler" style="min-width:{min_width}px">{"".join(ticks)}</div>'
 
 
@@ -712,6 +720,11 @@ def _write_results_html(
 
     # Diagnostic sites per sample: strip (genome position, color Ia/Ib/other) + table for ALL consensus genomes
     genome_length = results[0]["length"] if results else 0
+    # Trim strip display to the last diagnostic SNP position (any allegiance, incl. other)
+    if diagnostic_snp_positions and genome_length:
+        display_length = max(diagnostic_snp_positions)
+    else:
+        display_length = genome_length
     _first_alle = next((r.get("allegiances", []) for r in results if r.get("allegiances")), [])
     strip_min_w = max(600, len(_first_alle) * 2)
     rec_sites_html = ""
@@ -726,10 +739,10 @@ def _write_results_html(
         for (pos, allegiance) in sorted_alle:
             cls = "ia" if allegiance == "ia" else ("ib" if allegiance == "ib" else "other")
             lbl = ref1_label if allegiance == "ia" else (ref2_label if allegiance == "ib" else "other")
-            pct = pos / genome_length * 100 if genome_length else 0
+            pct = pos / display_length * 100 if display_length else 0
             strip_segments += f'<span class="strip-segment {cls}" title="{pos} bp – {html_escape(lbl)}" style="left:{pct:.3f}%"></span>'
         section_cls = "rec-sites-section" + (" recombinant" if rec_call == "potential recombinant" else "")
-        ruler_html = _genome_ruler_html(genome_length, strip_min_w)
+        ruler_html = _genome_ruler_html(display_length, strip_min_w)
         rec_sites_html += (
             f'<div class="{section_cls}" data-row="{ri}" data-recombinant="{html_escape(rec_call)}">'
             f'<div class="rec-sites-row">'
@@ -804,13 +817,13 @@ def _write_results_html(
                     merged_tracts[-1] = (merged_tracts[-1][0], end_pos, clade, merged_tracts[-1][3] + n_snps)
                 else:
                     merged_tracts.append((start_pos, end_pos, clade, n_snps))
-            bp_strip_min_w = max(600, genome_length // 150) if genome_length else 600
+            bp_strip_min_w = max(600, display_length // 150) if display_length else 600
             strip_segments = ""
             for j, (start_pos, end_pos, clade, n_snps) in enumerate(merged_tracts):
                 cls = "ia" if clade == "ia" else "ib"
                 lbl = ref1_label if clade == "ia" else ref2_label
-                left_pct = start_pos / genome_length * 100 if genome_length else 0
-                width_pct = max(0.3, (end_pos - start_pos + 1) / genome_length * 100) if genome_length else 2
+                left_pct = start_pos / display_length * 100 if display_length else 0
+                width_pct = max(0.3, (end_pos - start_pos + 1) / display_length * 100) if display_length else 2
                 strip_segments += (
                     f'<span class="strip-segment region-segment {cls}" title="{start_pos}–{end_pos} {html_escape(lbl)} ({n_snps} SNPs)" style="left:{left_pct:.3f}%; width:{width_pct:.3f}%;"></span>'
                 )
@@ -827,7 +840,7 @@ def _write_results_html(
                 summary_text = "No recombination tracts (genome entirely one clade)"
                 details_content = '<p class="threshold-note">No recombination detected; genome is entirely one clade.</p>'
             else:
-                bp_ruler_html = _genome_ruler_html(genome_length, bp_strip_min_w)
+                bp_ruler_html = _genome_ruler_html(display_length, bp_strip_min_w)
                 strip_display = (
                     f'<div class="strip-genome breakpoints-strip" style="min-width:{bp_strip_min_w}px" role="img" aria-label="Predicted regions and breakpoints">{strip_segments}</div>'
                     + bp_ruler_html
@@ -873,7 +886,7 @@ def _write_results_html(
             diagnostic_snp_positions, genome_length, num_bins=60
         )
         snp_histogram_json = json.dumps({"labels": hist_labels, "counts": hist_counts})
-        ruler_svg = _snp_positions_svg(diagnostic_snp_positions, genome_length)
+        ruler_svg = _snp_positions_svg(diagnostic_snp_positions, display_length)
         snp_positions_table_rows = "".join(
             f'<tr><td class="num">{i}</td><td class="num">{pos}</td></tr>'
             for i, pos in enumerate(diagnostic_snp_positions, start=1)
@@ -889,14 +902,14 @@ def _write_results_html(
             '<p class="threshold-note"><strong>{n_snps} diagnostic SNPs.</strong> Density of diagnostic SNPs along the reference (alignment coordinates). Use this to interpret where recombination breakpoints may fall. Squirrel always builds alignments relative to reference NC_003310 (Clade I) or NC_063383 (Clade II), not the refs you specified.</p>'
             '<div class="snp-positions-wrapper"><div class="chart-container" style="height:220px;"><canvas id="chartSnpPositions"></canvas></div></div>'
             '<h3 class="snp-ruler-title">Exact positions</h3>'
-            '<p class="threshold-note">Each tick marks one diagnostic SNP position along the genome (0 to {genome_length} bp).</p>'
+            '<p class="threshold-note">Each tick marks one diagnostic SNP position along the genome (0 to {display_length} bp).</p>'
             '<div class="snp-positions-wrapper snp-ruler-wrapper">' + ruler_svg + '</div>'
             '<details class="rec-sites-details"><summary>Show diagnostic site table</summary>'
             '<table class="rec-sites-table"><thead><tr><th>#</th><th>Position (bp)</th></tr></thead><tbody>'
             + snp_positions_table_rows +
             '</tbody></table></details>'
             '</div></details>'
-        ).format(n_snps=n_snps, genome_length=genome_length)
+        ).format(n_snps=n_snps, genome_length=genome_length, display_length=display_length)
 
     html = f"""<!DOCTYPE html>
 <html lang="en">
@@ -1029,7 +1042,7 @@ tr.recombinant {{ }}
 {threshold_html}
 </div>
 <details class="collapsible-section" open>
-<summary><h2>Per-genome classification (recombinant genomes)</h2><button class="pdf-btn" onclick="event.stopPropagation();exportTableXlsx()">&#8595; Download XLSX</button></summary>
+<summary><h2>Per-genome classification</h2><button class="pdf-btn" onclick="event.stopPropagation();exportTableXlsx()">&#8595; Download XLSX</button></summary>
 <div class="section-inner table-section">
 <table id="t">
 <thead>
@@ -1043,7 +1056,7 @@ tr.recombinant {{ }}
 </div>
 </details>
 <details class="collapsible-section" open>
-<summary><h2>Diagnostic SNPs per genome (stacked barplot)</h2><button class="pdf-btn" onclick="event.stopPropagation();exportChartPng(\'chartBar\',\'diagnostic_snps_barplot.png\')">&#8595; Download PNG</button></summary>
+<summary><h2>Diagnostic SNPs per genome</h2><button class="pdf-btn" onclick="event.stopPropagation();exportChartPng(\'chartBar\',\'diagnostic_snps_barplot.png\')">&#8595; Download PNG</button></summary>
 <div class="section-inner chart-section">
 <p class="threshold-note">Stacked percentage per genome: % {html_escape(ref1_label)} (blue), % {html_escape(ref2_label)} (purple), % other (gray).</p>
 <div class="chart-legend stacked-bar-legend">
