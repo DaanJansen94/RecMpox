@@ -551,15 +551,12 @@ def _write_results_html(
         ).format(n_total=n_diagnostic_sites)
     snps_only_note_html = ""
     cols = [
-        ("id", "ID", False),
-        ("length", "len", True),
+        ("id", "Sample ID", False),
+        ("length", "Length (bp)", True),
         ("n_diagnostic_snps", "Diagnostic sites", True),
-        ("n_ia", f"n_{ref1_label}", True),
-        ("n_ib", f"n_{ref2_label}", True),
-        ("n_other", "n_other", True),
-        ("pct_ia", f"% {ref1_label}", True),
-        ("pct_ib", f"% {ref2_label}", True),
-        ("pct_other", "% other", True),
+        (("n_ia", "pct_ia"), f"{ref1_label} (n | %)", True),
+        (("n_ib", "pct_ib"), f"{ref2_label} (n | %)", True),
+        (("n_other", "pct_other"), "other (n | %)", True),
         ("consensus_snp", "consensus (SNP)", False),
         ("recombinant_call", "recombinant", False),
     ]
@@ -593,21 +590,27 @@ def _write_results_html(
     for ri, r in enumerate(results):
         cells = []
         for i, (key, _label, is_num) in enumerate(cols):
-            val = r.get(key, "")
             cls = ' class="num"' if is_num else ""
-            if key == "id":
-                val_str = str(val).strip()
+            if isinstance(key, tuple):
+                key1, key2 = key
+                val1 = r.get(key1, "")
+                val2 = r.get(key2, "")
+                cells.append(f"<td{cls}>{html_escape(str(val1))} | {html_escape(str(val2))}</td>")
+            elif key == "id":
+                val_str = str(r.get(key, "")).strip()
+                display_str = val_str[:20] + ("\u2026" if len(val_str) > 20 else "")
+                title_attr = f' title="{html_escape(val_str)}"' if len(val_str) > 20 else ""
                 if val_str and _looks_like_accession(val_str):
                     url = "https://www.ncbi.nlm.nih.gov/nuccore/" + urllib.parse.quote(val_str, safe="")
-                    cells.append(f'<td{cls}><a class="accession-link" href="{html_escape(url)}" target="_blank" rel="noopener">{html_escape(val_str)}</a></td>')
+                    cells.append(f'<td{cls}><a class="accession-link" href="{html_escape(url)}" target="_blank" rel="noopener"{title_attr}>{html_escape(display_str)}</a></td>')
                 else:
-                    cells.append(f"<td{cls}>{html_escape(val_str)}</td>")
+                    cells.append(f"<td{cls}{title_attr}>{html_escape(display_str)}</td>")
             elif key == "recombinant_call":
-                rec = str(val)
+                rec = str(r.get(key, ""))
                 badge_cls = "recombinant-badge potential" if rec == "potential recombinant" else "recombinant-badge no"
                 cells.append(f'<td{cls}><span class="{badge_cls}">{html_escape(rec)}</span></td>')
             else:
-                cells.append(f"<td{cls}>{html_escape(str(val))}</td>")
+                cells.append(f"<td{cls}>{html_escape(str(r.get(key, '')))}</td>")
         rec = r.get("recombinant_call", "")
         row_cls = " class=\"recombinant\"" if rec == "potential recombinant" else ""
         rows_html.append(f'<tr data-row="{ri}" data-recombinant="{html_escape(rec)}"{row_cls}>' + "".join(cells) + "</tr>")
@@ -638,7 +641,10 @@ def _write_results_html(
     filter_row = "<tr id=\"filterrow\">" + "".join(filter_cells) + "</tr>"
 
     # Build list of dicts per row for JS (exclude allegiances to keep JSON small)
-    data_list = [{c[0]: r.get(c[0], "") for c in cols} for r in results]
+    # Flatten tuple keys (merged display columns) and always include chart keys
+    _chart_keys = {"id", "pct_ia", "pct_ib", "pct_other"}
+    _data_keys = {k for c in cols for k in (c[0] if isinstance(c[0], tuple) else (c[0],))} | _chart_keys
+    data_list = [{k: r.get(k, "") for k in _data_keys} for r in results]
     data_json = json.dumps(data_list).replace("</", "<\\/")
 
     # Diagnostic sites per sample: strip (genome position, color Ia/Ib/other) + table for ALL consensus genomes
@@ -1611,7 +1617,7 @@ Examples:
         f"when minor ref % ≥ {minor_threshold:g}%, the sample is flagged as potential recombinant."
     )
     other_explanation = (
-        "%% other = diagnostic sites where the query neither matched %s nor %s (different base; at SNPs, gap/N count as other)."
+        "%% other = diagnostic sites where the query neither matched %s nor %s (different base or gap/N count as other)."
     ) % (ref1_label, ref2_label)
 
     # HTML: one file if <= HTML_CHUNK_SIZE genomes, else one file per chunk of 100 (overzichtelijk)
