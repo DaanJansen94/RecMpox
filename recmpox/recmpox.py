@@ -555,7 +555,7 @@ def _write_results_html(
     import json
     from datetime import datetime
     out_path.parent.mkdir(parents=True, exist_ok=True)
-    gen_time = datetime.utcnow().strftime("%Y-%m-%dT%H:%M:%SZ")
+    gen_time = datetime.utcnow().strftime("%Y-%m-%d")
     n_diagnostic_sites = results[0]["n_diagnostic_snps"] if results else 0
     part_html = ""
     if part_index is not None and total_parts is not None and total_parts > 1:
@@ -721,7 +721,7 @@ def _write_results_html(
         strip_ref2_name = ref2_label if ref2_label not in ("ref1", "ref2") else (ref2_spec or ref2_label)
         rec_sites_html = (
             '<details class="collapsible-section diagnostic-strips-chart" open id="diagnosticStripsSection">'
-            '<summary><h2>Classification of diagnostic sites per sample</h2></summary>'
+            f'<summary><h2>Classification of diagnostic sites per sample</h2><button class="pdf-btn" onclick="event.stopPropagation();exportStripSvg(\'diagnosticStripsSection\',\'diagnosticStripsContainer\',\'Classification of diagnostic sites per sample\',\'{html_escape(ref1_label)}\',\'{html_escape(ref2_label)}\')">&#8595; Download SVG</button></summary>'
             '<div class="section-inner chart-section">'
             '<p class="threshold-note">One strip per consensus: each segment = one diagnostic site in genomic order. <span id="stripFilterCount" aria-live="polite"></span></p>'
             '<p class="threshold-note">{ref1} (blue), {ref2} (orange), other (gray).</p>'
@@ -814,7 +814,7 @@ def _write_results_html(
         strip_ref2_name = ref2_label if ref2_label not in ("ref1", "ref2") else (ref2_spec or ref2_label)
         breakpoints_section_html = (
             '<details class="collapsible-section diagnostic-strips-chart" open id="breakpointsStripsSection">'
-            '<summary><h2>Recombination tracts and predicted breakpoints per sample</h2></summary>'
+            f'<summary><h2>Recombination tracts and predicted breakpoints per sample</h2><button class="pdf-btn" onclick="event.stopPropagation();exportStripSvg(\'breakpointsStripsSection\',\'breakpointsStripsContainer\',\'Recombination tracts and predicted breakpoints per sample\',\'{html_escape(ref1_label)}\',\'{html_escape(ref2_label)}\')">&#8595; Download SVG</button></summary>'
             '<div class="section-inner chart-section">'
             '<p class="threshold-note">Each coloured tract spans from the <strong>first to the last diagnostic SNP</strong> unambiguously derived from that clade. The predicted breakpoint lies somewhere in the <strong>uncoloured gap</strong> between adjacent tracts — its exact position cannot be determined because those intervening regions lack clade-informative diagnostic SNPs. Minimum consecutive diagnostic SNPs per tract: <strong>{min_consecutive}</strong>. <span id="breakpointsFilterCount" aria-live="polite"></span></p>'
             '<p class="threshold-note">{ref1} (blue), {ref2} (orange). Grey gaps = predicted breakpoint region (may be widened by ambiguous bases or poorly sequenced areas).</p>'
@@ -958,6 +958,9 @@ tr.recombinant {{ }}
 .collapsible-section:not([open]) summary::before {{ transform: rotate(-90deg); }}
 .collapsible-section summary h2 {{ margin: 0; font-size: 1.2em; }}
 .collapsible-section .section-inner {{ padding: 20px; }}
+.pdf-btn {{ margin-left: auto; flex-shrink: 0; font-size: 0.78em; padding: 5px 13px; border: 1.5px solid #667eea; border-radius: 5px; background: white; color: #667eea; cursor: pointer; font-weight: 600; transition: background 0.15s, color 0.15s; white-space: nowrap; }}
+.pdf-btn:hover {{ background: #667eea; color: white; }}
+.pdf-btn:disabled {{ opacity: 0.6; cursor: default; }}
 </style>
 </head>
 <body>
@@ -1016,6 +1019,117 @@ tr.recombinant {{ }}
 </div>
 </div>
 <script>
+function escSvg(s) {{
+  return String(s).replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;').replace(/"/g,'&quot;');
+}}
+
+function exportStripSvg(sectionId, containerId, figTitle, ref1Label, ref2Label) {{
+  var section = document.getElementById(sectionId);
+  if (section) section.open = true;
+  var container = document.getElementById(containerId);
+  if (!container) return;
+
+  var rows = Array.from(container.querySelectorAll('.rec-sites-section:not(.hidden)'));
+  if (!rows.length) {{ alert('No visible samples to export.'); return; }}
+
+  // Layout constants (px → SVG user units)
+  var ml = 16, mr = 20;
+  var idW = 190;       // sample-ID column
+  var stripW = 1100;   // genome strip width
+  var W = ml + idW + stripW + mr;
+  var rowH = 28;
+  var rowGap = 5;
+  var rulerH = 22;
+  var titleH = 22;
+  var legendH = 26;
+  var topPad = titleH + 8;
+  var rowsH = rows.length * (rowH + rowGap) - rowGap;
+  var rulerLineY = topPad + rowsH + 6;
+  var rulerBaseY = rulerLineY + 18;
+  var legY = rulerBaseY + 22;
+  var H = legY + 14;
+
+  var colorMap = {{ ia: '#4A90D9', ib: '#E89B3C', other: '#95a5a6' }};
+  var isBp = !!container.querySelector('.breakpoints-strip');
+  var stripBg = isBp ? '#e2e7eb' : '#e9ecef';
+
+  var s = [];
+  s.push('<?xml version="1.0" encoding="UTF-8"?>');
+  s.push('<svg xmlns="http://www.w3.org/2000/svg" width="' + W + '" height="' + H + '">');
+  s.push('<rect width="100%" height="100%" fill="white"/>');
+
+  // Title
+  s.push('<text x="' + ml + '" y="' + (titleH - 4) + '" font-family="Arial,sans-serif" font-size="13" font-weight="bold" fill="#333">' + escSvg(figTitle) + '</text>');
+
+  // Sample rows
+  rows.forEach(function(row, ri) {{
+    var ry = topPad + ri * (rowH + rowGap);
+
+    // Sample ID (use title attr for full name if truncated)
+    var idEl = row.querySelector('.rec-sites-sample-id');
+    var sid = idEl ? (idEl.getAttribute('title') || idEl.textContent.trim()) : '';
+    if (sid.length > 28) sid = sid.slice(0,27) + '\u2026';
+    s.push('<text x="' + (ml+idW-4) + '" y="' + (ry+rowH/2) + '" font-family="Arial,sans-serif" font-size="10" fill="#333" text-anchor="end" dominant-baseline="middle">' + escSvg(sid) + '</text>');
+
+    // Strip background
+    s.push('<rect x="' + (ml+idW) + '" y="' + ry + '" width="' + stripW + '" height="' + rowH + '" fill="' + stripBg + '" rx="3"/>');
+
+    // Segments
+    var genome = row.querySelector('.strip-genome');
+    if (genome) {{
+      genome.querySelectorAll('.strip-segment').forEach(function(seg) {{
+        var cls = seg.classList;
+        var color = cls.contains('ia') ? colorMap.ia : cls.contains('ib') ? colorMap.ib : cls.contains('other') ? colorMap.other : null;
+        if (!color) return;
+        var lp = parseFloat(seg.style.left);
+        if (isNaN(lp)) return;
+        var wp = seg.style.width ? parseFloat(seg.style.width) : 0;
+        var sx = ml + idW + (lp/100) * stripW;
+        var sw = wp ? Math.max(2, (wp/100)*stripW) : 2;
+        s.push('<rect x="' + sx.toFixed(1) + '" y="' + ry + '" width="' + sw.toFixed(1) + '" height="' + rowH + '" fill="' + color + '"/>');
+      }});
+      // Strip border
+      s.push('<rect x="' + (ml+idW) + '" y="' + ry + '" width="' + stripW + '" height="' + rowH + '" fill="none" stroke="#dee2e6" stroke-width="0.5" rx="3"/>');
+    }}
+  }});
+
+  // Ruler – below the sample rows, read ticks from first visible row
+  var firstRuler = rows[0].querySelector('.strip-ruler');
+  if (firstRuler) {{
+    s.push('<line x1="' + (ml+idW) + '" y1="' + rulerLineY + '" x2="' + (ml+idW+stripW) + '" y2="' + rulerLineY + '" stroke="#ccc" stroke-width="0.5"/>');
+    firstRuler.querySelectorAll('.ruler-tick').forEach(function(tick) {{
+      var lp = parseFloat(tick.style.left);
+      if (isNaN(lp)) return;
+      var tx = ml + idW + (lp/100) * stripW;
+      s.push('<line x1="' + tx + '" y1="' + rulerLineY + '" x2="' + tx + '" y2="' + (rulerLineY+6) + '" stroke="#adb5bd" stroke-width="1"/>');
+      s.push('<text x="' + tx + '" y="' + rulerBaseY + '" font-family="Arial,sans-serif" font-size="9" fill="#777" text-anchor="middle">' + escSvg(tick.textContent.trim()) + '</text>');
+    }});
+  }}
+
+  // Legend
+  var legX = ml + idW;
+  function legItem(x, color, label, isRect) {{
+    if (isRect) s.push('<rect x="'+x+'" y="'+(legY-11)+'" width="13" height="13" fill="'+color+'" stroke="#adb5bd" stroke-width="0.5" rx="2"/>');
+    else s.push('<rect x="'+x+'" y="'+(legY-11)+'" width="13" height="13" fill="'+color+'" rx="2"/>');
+    s.push('<text x="'+(x+17)+'" y="'+legY+'" font-family="Arial,sans-serif" font-size="10" fill="#495057">'+escSvg(label)+'</text>');
+  }}
+  legItem(legX, '#4A90D9', ref1Label, false); legX += 14+8+ref1Label.length*6+12;
+  legItem(legX, '#E89B3C', ref2Label, false); legX += 14+8+ref2Label.length*6+12;
+  if (!isBp) {{
+    legItem(legX, '#95a5a6', 'other', false);
+  }} else {{
+    legItem(legX, '#e2e7eb', 'predicted breakpoint region', true);
+  }}
+
+  s.push('</svg>');
+
+  var blob = new Blob([s.join('\\n')], {{ type: 'image/svg+xml;charset=utf-8' }});
+  var a = document.createElement('a');
+  a.href = URL.createObjectURL(blob);
+  a.download = figTitle.replace(/[^a-z0-9]+/gi,'_').toLowerCase() + '.svg';
+  document.body.appendChild(a); a.click(); document.body.removeChild(a);
+  URL.revokeObjectURL(a.href);
+}}
 (function() {{
   function run() {{
     if (typeof Chart === "undefined") {{ setTimeout(run, 30); return; }}
