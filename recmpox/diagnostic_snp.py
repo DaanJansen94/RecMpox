@@ -515,7 +515,7 @@ def get_runs_and_breakpoints(
                 last_clade_pos = next_pos
                 n_snps += 1
                 i += 1
-            elif next_a == "other" and ignore_other:
+            elif next_a in ("other", "ambiguous") and ignore_other:
                 # Transparent: skip without updating last_clade_pos or n_snps
                 i += 1
             else:

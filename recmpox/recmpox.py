@@ -48,6 +48,10 @@ logger = logging.getLogger(__name__)
 
 NCBI_EFETCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 
+# Bundled references for -phylogeny (lives in recmpox/references/ inside the package)
+_REFERENCES_DIR = Path(__file__).resolve().parent / "references"
+PHYLOGENY_REFS_FASTA = _REFERENCES_DIR / "mpox_references.fasta"
+
 
 def _safe_fasta_id(raw_id: str) -> str:
     """
@@ -386,6 +390,288 @@ def _run_squirrel(clade: Optional[str], squirrel_in: Path, squirrel_out: Path, e
         sys.exit(1)
 
 
+def _extract_tracts_as_n_full_length(
+    aligned_seq: str,
+    merged_tracts: List[Tuple[int, int, str, int]],
+    keep_clade: str,
+) -> str:
+    """Return full-length (degapped) sequence with only *keep_clade* tract
+    positions keeping their base; all other positions (other clade + other/ambiguous) → N.
+    So only Ia or only Ib bases are retained; everything not classified as that clade becomes N.
+    Positions in merged_tracts are 1-based.
+    """
+    seq = list(aligned_seq)
+    in_keep = [False] * len(seq)
+    for start_pos, end_pos, clade, _ in merged_tracts:
+        if clade != keep_clade:
+            continue
+        for i in range(start_pos - 1, min(end_pos, len(seq))):
+            in_keep[i] = True
+    for i in range(len(seq)):
+        if not in_keep[i] and seq[i] != "-":
+            seq[i] = "N"
+    return "".join(c for c in seq if c != "-")
+
+
+def _extract_tract_sequences(
+    out_dir: Path,
+    results: List[dict],
+    alignments_queries: Dict[str, str],
+    ref1_label: str,
+    ref2_label: str,
+    min_consecutive: int = 1,
+    line_len: int = 80,
+    include_indels: bool = False,
+) -> None:
+    """Write two FASTA files: only Ia or only Ib tract bases kept; everything else → N.
+
+    Extract only positions classified as that clade; positions classified as the
+    other clade or as other/ambiguous are converted to N (ambiguous bases).
+
+    When include_indels is False: only samples with recombinant_call == "potential recombinant".
+    When include_indels is True: extract for all samples that have two distinct tracts.
+
+    * ``<out_dir>/<ref1_label>_dominant.fa`` — only ref1 (Ia) tract positions keep base; Ib + other → N.
+    * ``<out_dir>/<ref2_label>_dominant.fa`` — only ref2 (Ib) tract positions keep base; Ia + other → N.
+
+    Tract boundaries use all positions in each sample's allegiances (including
+    indel columns when -include-indels was used).  Clade labels: ``"ia"`` (ref1), ``"ib"`` (ref2).
+    """
+    out_dir.mkdir(parents=True, exist_ok=True)
+    ref1_out = out_dir / f"{ref1_label}_dominant.fa"
+    ref2_out = out_dir / f"{ref2_label}_dominant.fa"
+    n_written = 0
+    n_skip_not_recombinant = 0
+    n_skip_one_tract = 0
+    n_skip_no_seq = 0
+    with open(ref1_out, "w") as fh1, open(ref2_out, "w") as fh2:
+        for r in results:
+            if not include_indels and r.get("recombinant_call") != "potential recombinant":
+                n_skip_not_recombinant += 1
+                continue
+            sample_id = r["id"]
+            allegiances = r.get("allegiances", [])
+            if not allegiances:
+                continue
+            # Derive positions from allegiances directly — includes both SNP and
+            # indel column positions when -include-indels was used.
+            all_positions = sorted(set(p for (p, _) in allegiances))
+            merged_tracts = _compute_merged_tracts(allegiances, all_positions, min_consecutive)
+            clades_present = {c for _, _, c, _ in merged_tracts}
+            if len(clades_present) < 2:
+                n_skip_one_tract += 1
+                continue
+            aligned_seq = alignments_queries.get(sample_id)
+            if not aligned_seq:
+                n_skip_no_seq += 1
+                continue
+
+            # ref1 (Ia) file: keep only ia tract bases; Ib + other → N.
+            # ref2 (Ib) file: keep only ib tract bases; Ia + other → N.
+            seq1 = _extract_tracts_as_n_full_length(aligned_seq, merged_tracts, keep_clade="ia")
+            fh1.write(f">{sample_id} {ref1_label}_tracts_only\n")
+            for i in range(0, len(seq1), line_len):
+                fh1.write(seq1[i : i + line_len] + "\n")
+
+            seq2 = _extract_tracts_as_n_full_length(aligned_seq, merged_tracts, keep_clade="ib")
+            fh2.write(f">{sample_id} {ref2_label}_tracts_only\n")
+            for i in range(0, len(seq2), line_len):
+                fh2.write(seq2[i : i + line_len] + "\n")
+
+            n_written += 1
+
+    if n_written == 0:
+        ref1_out.unlink(missing_ok=True)
+        ref2_out.unlink(missing_ok=True)
+        if out_dir.exists():
+            try:
+                out_dir.rmdir()
+            except OSError:
+                pass
+        logger.warning(
+            "--extract-tracts: no sample had two distinct tracts (skipped: %d not recombinant, %d single-tract, %d no alignment). No masked FASTA written.",
+            n_skip_not_recombinant, n_skip_one_tract, n_skip_no_seq,
+        )
+    else:
+        logger.info("--extract-tracts: wrote %d sample(s) → %s and %s", n_written, ref1_out, ref2_out)
+
+
+def _load_fasta_dict(path: Path) -> Dict[str, str]:
+    """Load FASTA as dict: first token of header -> full sequence (no gap stripping)."""
+    return load_alignment_fasta(path)
+
+
+def _run_phylogeny_pipeline(
+    args: Any,
+    work_dir: Path,
+    ref1_label: str,
+    ref2_label: str,
+    squirrel_clade: Optional[str],
+) -> None:
+    """
+    Run phylogeny: merge references + Ia/Ib partition FASTAs, align with Squirrel,
+    run IQ-TREE (GTR, -bb 1000), midpoint-root, then write tree + PDF into output/phylogeny/.
+    All IQ-TREE outputs and the midpoint-rooted treefile + PDF live in output/phylogeny/.
+    """
+    extracted_dir = args.output / "extracted_tracts"
+    ref1_fa = extracted_dir / f"{ref1_label}_dominant.fa"
+    ref2_fa = extracted_dir / f"{ref2_label}_dominant.fa"
+    if not ref1_fa.exists() or not ref2_fa.exists():
+        logger.warning("--phylogeny: extracted tract FASTAs not found (%s, %s); skipping phylogeny.", ref1_fa, ref2_fa)
+        return
+
+    # Use only the bundled reference set (no user override)
+    refs_path = PHYLOGENY_REFS_FASTA
+    if not refs_path.exists():
+        logger.error("--phylogeny: bundled references not found at %s", refs_path)
+        sys.exit(1)
+
+    refs_seqs = _load_fasta_dict(refs_path)
+    if not refs_seqs:
+        logger.error("--phylogeny: no sequences in %s", refs_path)
+        sys.exit(1)
+
+    part1_seqs = _load_fasta_dict(ref1_fa)
+    part2_seqs = _load_fasta_dict(ref2_fa)
+    if not part1_seqs or not part2_seqs:
+        logger.warning("--phylogeny: one or both partition FASTAs empty; skipping phylogeny.")
+        return
+
+    # All phylogeny outputs go into output/phylogeny/ (combined FASTA, Squirrel, IQ-TREE, treefile, PDF)
+    phylogeny_dir = args.output / "phylogeny"
+    phylogeny_dir.mkdir(parents=True, exist_ok=True)
+    combined_fa = phylogeny_dir / "phylogeny_combined.fa"
+    line_len = 80
+    seen_ref: Dict[str, int] = {}
+    with open(combined_fa, "w") as out:
+        for rid, seq in refs_seqs.items():
+            safe = _safe_fasta_id(rid)
+            n = seen_ref.get(safe, 0) + 1
+            seen_ref[safe] = n
+            header = safe if n == 1 else f"{safe}_{n}"
+            out.write(f">{header}\n")
+            for i in range(0, len(seq), line_len):
+                out.write(seq[i : i + line_len] + "\n")
+        for sid, seq in part1_seqs.items():
+            header = _safe_fasta_id(sid) + f"_{ref1_label}_tracts"
+            out.write(f">{header}\n")
+            for i in range(0, len(seq), line_len):
+                out.write(seq[i : i + line_len] + "\n")
+        for sid, seq in part2_seqs.items():
+            header = _safe_fasta_id(sid) + f"_{ref2_label}_tracts"
+            out.write(f">{header}\n")
+            for i in range(0, len(seq), line_len):
+                out.write(seq[i : i + line_len] + "\n")
+
+    logger.info("Wrote combined FASTA for phylogeny: %s (refs + %s + %s partitions)", combined_fa, ref1_label, ref2_label)
+
+    # Squirrel alignment
+    squirrel_out_phy = phylogeny_dir / "squirrel_out"
+    squirrel_out_phy.mkdir(parents=True, exist_ok=True)
+    aln_stem = combined_fa.stem + ".aln.fasta"
+    expected_aln = squirrel_out_phy / aln_stem
+    _run_squirrel(squirrel_clade, combined_fa, squirrel_out_phy, expected_aln)
+    if not expected_aln.exists():
+        logger.error("--phylogeny: Squirrel did not produce %s", expected_aln)
+        sys.exit(1)
+
+    # IQ-TREE: -s alignment -m GTR -bb 1000
+    iqtree_prefix = phylogeny_dir / "alignment"
+    try:
+        # -pre: output file prefix (alignment.treefile, alignment.iqtree, alignment.log, etc.)
+        # -czb: collapse zero-length branches into polytomies
+        cmd_iqtree = [
+            "iqtree",
+            "-s", str(expected_aln),
+            "-m", "GTR",
+            "-bb", "1000",
+            "-pre", str(iqtree_prefix),
+            "-czb",
+        ]
+        if getattr(args, "threads", 1) and int(args.threads) > 1:
+            cmd_iqtree.extend(["-nt", str(args.threads)])
+        logger.info("Running IQ-TREE: %s", " ".join(cmd_iqtree))
+        result = subprocess.run(cmd_iqtree, timeout=7200)
+        if result.returncode != 0:
+            logger.error("IQ-TREE failed (exit %s).", result.returncode)
+            sys.exit(1)
+    except FileNotFoundError as e:
+        logger.error("iqtree not found (install e.g. conda install -c bioconda iqtree2): %s", e)
+        sys.exit(1)
+
+    treefile = iqtree_prefix.with_suffix(".treefile")
+    if not treefile.exists():
+        treefile = Path(str(iqtree_prefix) + ".treefile")
+    if not treefile.exists():
+        logger.error("--phylogeny: IQ-TREE did not produce treefile at %s", treefile)
+        sys.exit(1)
+
+    # Midpoint root and write tree + PDF into output/phylogeny/
+    out_tree_path = phylogeny_dir / "phylogeny_tree.treefile"
+    pdf_path = phylogeny_dir / "phylogeny_tree.pdf"
+    pdf_written = False
+    midpoint_rooted = False
+    try:
+        # Headless: use Qt offscreen so PDF can be rendered without a display
+        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
+        from ete3 import Tree, NodeStyle, TreeStyle
+        t = Tree(str(treefile))
+        try:
+            R = t.get_midpoint_outgroup()
+            # Only set outgroup if R is not already the root (avoids "Cannot set myself as outgroup")
+            if R is not t:
+                t.set_outgroup(R)
+                midpoint_rooted = True
+            else:
+                # Fallback: midpoint was the root; root on one of the root's children so tree is rooted
+                if t.children:
+                    t.set_outgroup(t.children[0])
+                    midpoint_rooted = True
+                    logger.info("Midpoint was current root; rooted on alternate branch so tree is rooted.")
+            if not midpoint_rooted:
+                logger.warning("Midpoint outgroup is the current root; tree left unrooted.")
+        except Exception as e:
+            logger.warning("Midpoint rooting failed: %s; tree left unrooted.", e)
+        # Always write the tree we have (rooted or unrooted) so FigTree opens it as-is
+        if midpoint_rooted:
+            t.write(outfile=str(out_tree_path))
+            logger.info("Wrote midpoint-rooted tree: %s", out_tree_path)
+        else:
+            shutil.copy(treefile, out_tree_path)
+            logger.info("Wrote tree (unrooted): %s", out_tree_path)
+
+        # PDF in phylogeny folder: tips as circles; extracted tracts = dark red/pink, references = grey
+        TRACT_COLOR = "#C71585"   # dark red-pink (medium violet red) for each extracted tract
+        REF_COLOR = "#808080"     # grey for references
+        for node in t.traverse():
+            if node.is_leaf():
+                nstyle = NodeStyle()
+                nstyle["shape"] = "circle"
+                nstyle["size"] = 4
+                name = node.name or ""
+                nstyle["fgcolor"] = TRACT_COLOR if "_tracts" in name else REF_COLOR
+                node.set_style(nstyle)
+        ts = TreeStyle()
+        t.render(str(pdf_path), w=800, units="px", tree_style=ts)
+        pdf_written = pdf_path.exists()
+        if pdf_written:
+            logger.info("Wrote phylogeny tree PDF: %s", pdf_path)
+    except ImportError:
+        logger.warning("ete3 not installed; skipping midpoint rooting and PDF. Install with: pip install ete3")
+        if not out_tree_path.exists() and treefile.exists():
+            shutil.copy(treefile, out_tree_path)
+    except Exception as e:
+        logger.warning("ete3 tree plot failed: %s; open the .treefile in FigTree to export PDF.", e)
+        if not out_tree_path.exists() and treefile.exists():
+            shutil.copy(treefile, out_tree_path)
+
+    root_label = "midpoint-rooted tree" if midpoint_rooted else "tree (unrooted)"
+    if pdf_written:
+        print(f"  Phylogeny: {root_label} {out_tree_path}; PDF {pdf_path}")
+    else:
+        print(f"  Phylogeny: {root_label} {out_tree_path}; PDF not generated (open .treefile in FigTree to export PDF)")
+
+
 def _write_all_sequences_fasta(
     out_path: Path,
     ref_ia_key: str,
@@ -551,6 +837,41 @@ def _snp_positions_histogram_bins(
         end_k = end_bp / 1000
         labels.append(f"{start_k:.0f}k–{end_k:.0f}k")
     return labels, counts
+
+
+def _compute_merged_tracts(
+    allegiances: List[Tuple[int, str]],
+    diagnostic_snp_positions: List[int],
+    min_consecutive: int = 1,
+) -> List[Tuple[int, int, str, int]]:
+    """Return merged, sustained recombination tracts from per-sample allegiances.
+
+    Returns a list of (start_pos, end_pos, clade, n_snps) in alignment-column coordinates
+    (1-based).  Only tracts with >= min_consecutive SNPs are kept.
+    """
+    if not allegiances:
+        return []
+    runs, _ = get_runs_and_breakpoints(
+        allegiances, diagnostic_snp_positions,
+        min_consecutive=min_consecutive, ignore_other=True,
+    )
+    # First merge: collapse adjacent same-clade runs (gaps = "other"/ambiguous)
+    merged: List[Tuple[int, int, str, int]] = []
+    for start_pos, end_pos, clade, n_snps in runs:
+        if merged and merged[-1][2] == clade:
+            merged[-1] = (merged[-1][0], end_pos, clade, merged[-1][3] + n_snps)
+        else:
+            merged.append((start_pos, end_pos, clade, n_snps))
+    # Filter to sustained tracts
+    sustained = [m for m in merged if m[3] >= min_consecutive]
+    # Second merge: consecutive same-clade after short-run removal
+    merged_tracts: List[Tuple[int, int, str, int]] = []
+    for start_pos, end_pos, clade, n_snps in sustained:
+        if merged_tracts and merged_tracts[-1][2] == clade:
+            merged_tracts[-1] = (merged_tracts[-1][0], end_pos, clade, merged_tracts[-1][3] + n_snps)
+        else:
+            merged_tracts.append((start_pos, end_pos, clade, n_snps))
+    return merged_tracts
 
 
 def _genome_ruler_html(genome_length: int, min_width: int) -> str:
@@ -794,29 +1115,7 @@ def _write_results_html(
             allegiances = r.get("allegiances", [])
             sample_id = r.get("id", "")
             rec_call = r.get("recombinant_call", "")
-            runs: List[Tuple[int, int, str, int]] = []
-            breakpoints: List[Tuple[int, int, str, str]] = []
-            if allegiances:
-                runs, breakpoints = get_runs_and_breakpoints(
-                    allegiances, diagnostic_snp_positions, min_consecutive=min_consecutive,
-                    ignore_other=True,
-                )
-            # Merge consecutive runs of the same clade (gaps = "other" ambiguous sites; treat as one tract)
-            merged: List[Tuple[int, int, str, int]] = []
-            for (start_pos, end_pos, clade, n_snps) in runs:
-                if merged and merged[-1][2] == clade:
-                    merged[-1] = (merged[-1][0], end_pos, clade, merged[-1][3] + n_snps)
-                else:
-                    merged.append((start_pos, end_pos, clade, n_snps))
-            # Keep only sustained tracts (>= min_consecutive SNPs); if min_consecutive=1, keep all tracts.
-            sustained = [m for m in merged if m[3] >= min_consecutive]
-            # Merge again: consecutive same-clade in sustained (can occur after dropping short runs when min_consecutive>1)
-            merged_tracts = []
-            for (start_pos, end_pos, clade, n_snps) in sustained:
-                if merged_tracts and merged_tracts[-1][2] == clade:
-                    merged_tracts[-1] = (merged_tracts[-1][0], end_pos, clade, merged_tracts[-1][3] + n_snps)
-                else:
-                    merged_tracts.append((start_pos, end_pos, clade, n_snps))
+            merged_tracts = _compute_merged_tracts(allegiances, diagnostic_snp_positions, min_consecutive)
             bp_strip_min_w = max(600, display_length // 150) if display_length else 600
             strip_segments = ""
             for j, (start_pos, end_pos, clade, n_snps) in enumerate(merged_tracts):
@@ -1556,13 +1855,27 @@ Examples:
     optional.add_argument("-min-indel-size", type=int, default=100, dest="min_indel_size", metavar="", help="Minimum indel length (bp) for diagnostic indels when using -include-indels (default: 100)")
     optional.add_argument("-t", "-threads", dest="threads", type=int, default=1, metavar="", help="Specify number of threads to use (n=1 by default)")
     optional.add_argument("-q", "-quiet", action="store_true", dest="quiet", help="Log to file only")
-
+    optional.add_argument(
+        "-extract-tracts",
+        action="store_true",
+        dest="extract_tracts",
+        help="Split recombinant genomes by ancestry.",
+    )
+    optional.add_argument(
+        "-phylogeny",
+        action="store_true",
+        dest="phylogeny",
+        help="After extract-tracts: merge refs + two partition FASTAs, align with Squirrel, run IQ-TREE (GTR, 1k bootstrap), midpoint-root, and export tree PDF with partition tips in dark pink.",
+    )
     # If called with no arguments, show help (same output as --help) instead of erroring.
     if len(sys.argv) == 1:
         parser.print_help()
         return
 
     args = parser.parse_args()
+
+    if getattr(args, "phylogeny", False):
+        args.extract_tracts = True
 
     if getattr(args, "minor_ref_pct", None) is None:
         args.minor_ref_pct = MINOR_REF_PCT_THRESHOLD
@@ -1896,15 +2209,36 @@ Examples:
         logger.info("Wrote %s", index_path)
         html_files.insert(0, index_path)
 
-    # One combined FASTA: ref1 + ref2 + all query sequences (aligned length)
-    out_fasta = args.output / "all_sequences.fasta"
-    _write_all_sequences_fasta(out_fasta, ref_ia_aln_key, ref_ib_aln_key, ref_ia_seq, ref_ib_seq, alignments_queries, ref_keys_in_queries)
-    logger.info("Wrote %s (ref1 + ref2 + all queries)", out_fasta)
+    # Optional: extract per-clade tract sequences for potential recombinants (Ia-only / Ib-only positions)
+    if getattr(args, "extract_tracts", False):
+        if not getattr(args, "include_indels", False):
+            logger.info(
+                "--extract-tracts tip: consider adding -include-indels so that large "
+                "clade-specific deletions are included in tract boundaries."
+            )
+        _extract_tract_sequences(
+            out_dir=args.output / "extracted_tracts",
+            results=results,
+            alignments_queries=alignments_queries,
+            ref1_label=ref1_label,
+            ref2_label=ref2_label,
+            min_consecutive=int(getattr(args, "breakpoint_min_snps", 1)),
+            include_indels=getattr(args, "include_indels", False),
+        )
 
-    with open(work_dir / "diagnostic_snps.txt", "w") as f:
+    # Optional: phylogeny from refs + two partition FASTAs (requires extract-tracts)
+    if getattr(args, "phylogeny", False):
+        _run_phylogeny_pipeline(args, work_dir, ref1_label, ref2_label, squirrel_clade)
+
+    with open(args.output / "diagnostic_snps.txt", "w") as f:
         f.write("position\tia_allele\tib_allele\n")
         for pos, ia_a, ib_a in diagnostic_snps:
             f.write(f"{pos}\t{ia_a}\t{ib_a}\n")
+
+    # Remove work dir (intermediate files not needed)
+    if work_dir.exists():
+        shutil.rmtree(work_dir)
+        logger.info("Removed intermediate files (work/)")
 
     if n_indel_columns is not None:
         logger.info(
@@ -1917,7 +2251,7 @@ Examples:
             out_tsv, len(results), n_snps, n_diagnostic_sites,
         )
     html_str = html_files[0].name if len(html_files) == 1 else "index: " + html_files[0].name + " + " + ", ".join(p.name for p in html_files[1:])
-    print(f"Done. {len(results)} genomes. Results: {out_tsv}  HTML: {html_str}  FASTA: {out_fasta}")
+    print(f"Done. {len(results)} genomes. Results: {out_tsv}  HTML: {html_str}")
     if n_indel_columns is not None:
         print(f"  Diagnostic SNPs: {n_snps}; indel columns: {n_indel_columns}; total diagnostic sites: {n_diagnostic_sites}")
     else:

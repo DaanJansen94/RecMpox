@@ -121,11 +121,11 @@ recmpox -i fasta/ -o output -ref Ia,Ib -include-indels
 
 - **recmpox_results.tsv**: Per-genome counts (n_ref1, n_ref2, n_other), percentages (pct_ref1, pct_ref2, pct_other), and recombinant call (no recombinant / potential recombinant).
 - **recmpox_results.html**: Interactive report (summary, sortable table, stacked bar chart, diagnostic SNP positions, diagnostic sites per sample, recombination tracts and breakpoints per sample). Split into multiple files + index when >100 genomes.
-- **all_sequences.fasta**: Ref1, ref2, and all query sequences (aligned).
 - **potential_recombinants_diagnostic_sites.tsv**: Diagnostic site classification per potential recombinant (when any exist).
+- **diagnostic_snps.txt**: List of diagnostic SNP positions (ref1 vs ref2 alleles).
 - **.recmpox.log**: Log file (in output directory).
-
-Intermediate files (e.g. diagnostic_snps.txt, Squirrel outputs) are written under `work/`.
+- With **-extract-tracts**: **extracted_tracts/** — per-sample FASTA with only Ia tract positions (rest N) and only Ib tract positions (rest N).
+- With **-phylogeny**: **phylogeny/** folder containing all IQ-TREE outputs (e.g. alignment.treefile, alignment.log, alignment.iqtree), **phylogeny_tree.treefile** (midpoint-rooted so FigTree opens it rooted), and **phylogeny_tree.pdf** (tips as circles: dark red-pink = extracted tracts, grey = references). Intermediate files under `work/` are removed after the run.
 
 ## Interpretation
 

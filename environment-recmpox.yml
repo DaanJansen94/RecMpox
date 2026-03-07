@@ -7,5 +7,7 @@ dependencies:
   - minimap2
   - samtools
   - squirrel
+  - iqtree=2.4.0
+  - ete3
 variables:
   PYTHONNOUSERSITE: "1"
