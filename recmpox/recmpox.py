@@ -565,8 +565,8 @@ def _run_phylogeny_pipeline(
 
     logger.info("Wrote combined FASTA for phylogeny: %s (refs + %s + %s partitions)", combined_fa, ref1_label, ref2_label)
 
-    # Squirrel alignment
-    squirrel_out_phy = phylogeny_dir / "squirrel_out"
+    # Squirrel alignment (output in work_dir so it is removed; we keep only the alignment in phylogeny/)
+    squirrel_out_phy = work_dir / "phylogeny_squirrel"
     squirrel_out_phy.mkdir(parents=True, exist_ok=True)
     aln_stem = combined_fa.stem + ".aln.fasta"
     expected_aln = squirrel_out_phy / aln_stem
@@ -574,6 +574,9 @@ def _run_phylogeny_pipeline(
     if not expected_aln.exists():
         logger.error("--phylogeny: Squirrel did not produce %s", expected_aln)
         sys.exit(1)
+    # Copy alignment into phylogeny/ so IQ-TREE runs from there (squirrel_out not kept)
+    aln_in_phylogeny = phylogeny_dir / aln_stem
+    shutil.copy(expected_aln, aln_in_phylogeny)
 
     # IQ-TREE: -s alignment -m GTR -bb 1000
     iqtree_prefix = phylogeny_dir / "alignment"
@@ -582,7 +585,7 @@ def _run_phylogeny_pipeline(
         # -czb: collapse zero-length branches into polytomies
         cmd_iqtree = [
             "iqtree",
-            "-s", str(expected_aln),
+            "-s", str(aln_in_phylogeny),
             "-m", "GTR",
             "-bb", "1000",
             "-pre", str(iqtree_prefix),
@@ -661,7 +664,7 @@ def _run_phylogeny_pipeline(
         if not out_tree_path.exists() and treefile.exists():
             shutil.copy(treefile, out_tree_path)
     except Exception as e:
-        logger.warning("ete3 tree plot failed: %s; open the .treefile in FigTree to export PDF.", e)
+        logger.warning("ete3 tree plot failed: %s; PDF would be at %s (open .treefile in FigTree to export PDF).", e, pdf_path)
         if not out_tree_path.exists() and treefile.exists():
             shutil.copy(treefile, out_tree_path)
 
@@ -669,7 +672,7 @@ def _run_phylogeny_pipeline(
     if pdf_written:
         print(f"  Phylogeny: {root_label} {out_tree_path}; PDF {pdf_path}")
     else:
-        print(f"  Phylogeny: {root_label} {out_tree_path}; PDF not generated (open .treefile in FigTree to export PDF)")
+        print(f"  Phylogeny: {root_label} {out_tree_path}; PDF not created (would be {pdf_path}; open .treefile in FigTree to export PDF)")
 
 
 def _write_all_sequences_fasta(
