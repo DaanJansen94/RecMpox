@@ -8,6 +8,10 @@ dependencies:
   - samtools
   - squirrel
   - iqtree=2.4.0
-  - ete3
+  - r-base
+  - r-ape
+  - r-phytools
+  - bioconductor-ggtree
+  - r-ggplot2
 variables:
   PYTHONNOUSERSITE: "1"

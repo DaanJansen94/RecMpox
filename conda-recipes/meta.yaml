@@ -32,6 +32,12 @@ requirements:
     - minimap2
     - samtools
     - squirrel
+    - iqtree=2.4.0
+    - r-base
+    - r-ape
+    - r-ggplot2
+    - r-phytools
+    - bioconductor-ggtree
 
 test:
   imports:

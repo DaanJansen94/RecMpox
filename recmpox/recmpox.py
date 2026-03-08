@@ -18,6 +18,7 @@ recombination breakpoints.
 """
 
 import argparse
+import base64
 import logging
 import os
 import re
@@ -51,6 +52,7 @@ NCBI_EFETCH = "https://eutils.ncbi.nlm.nih.gov/entrez/eutils/efetch.fcgi"
 # Bundled references for -phylogeny (lives in recmpox/references/ inside the package)
 _REFERENCES_DIR = Path(__file__).resolve().parent / "references"
 PHYLOGENY_REFS_FASTA = _REFERENCES_DIR / "mpox_references.fasta"
+ROOT_TREE_FIGURE_R = _REFERENCES_DIR / "root_tree_figure.R"
 
 
 def _safe_fasta_id(raw_id: str) -> str:
@@ -431,15 +433,15 @@ def _extract_tract_sequences(
     When include_indels is False: only samples with recombinant_call == "potential recombinant".
     When include_indels is True: extract for all samples that have two distinct tracts.
 
-    * ``<out_dir>/<ref1_label>_dominant.fa`` — only ref1 (Ia) tract positions keep base; Ib + other → N.
-    * ``<out_dir>/<ref2_label>_dominant.fa`` — only ref2 (Ib) tract positions keep base; Ia + other → N.
+    * ``<out_dir>/<ref1_label>_recombinant_ancestral_tract.fa`` — only ref1 (Ia) tract positions keep base; Ib + other → N.
+    * ``<out_dir>/<ref2_label>_recombinant_ancestral_tract.fa`` — only ref2 (Ib) tract positions keep base; Ia + other → N.
 
     Tract boundaries use all positions in each sample's allegiances (including
     indel columns when -include-indels was used).  Clade labels: ``"ia"`` (ref1), ``"ib"`` (ref2).
     """
     out_dir.mkdir(parents=True, exist_ok=True)
-    ref1_out = out_dir / f"{ref1_label}_dominant.fa"
-    ref2_out = out_dir / f"{ref2_label}_dominant.fa"
+    ref1_out = out_dir / f"{ref1_label}_recombinant_ancestral_tract.fa"
+    ref2_out = out_dir / f"{ref2_label}_recombinant_ancestral_tract.fa"
     n_written = 0
     n_skip_not_recombinant = 0
     n_skip_one_tract = 0
@@ -510,12 +512,12 @@ def _run_phylogeny_pipeline(
 ) -> None:
     """
     Run phylogeny: merge references + Ia/Ib partition FASTAs, align with Squirrel,
-    run IQ-TREE (GTR, -bb 1000), midpoint-root, then write tree + PDF into output/phylogeny/.
+    run IQ-TREE (GTR, -bb 10000), midpoint-root, then write tree + PDF into output/phylogeny/.
     All IQ-TREE outputs and the midpoint-rooted treefile + PDF live in output/phylogeny/.
     """
-    extracted_dir = args.output / "extracted_tracts"
-    ref1_fa = extracted_dir / f"{ref1_label}_dominant.fa"
-    ref2_fa = extracted_dir / f"{ref2_label}_dominant.fa"
+    tracts_dir = args.output / "tracts"
+    ref1_fa = tracts_dir / f"{ref1_label}_recombinant_ancestral_tract.fa"
+    ref2_fa = tracts_dir / f"{ref2_label}_recombinant_ancestral_tract.fa"
     if not ref1_fa.exists() or not ref2_fa.exists():
         logger.warning("--phylogeny: extracted tract FASTAs not found (%s, %s); skipping phylogeny.", ref1_fa, ref2_fa)
         return
@@ -537,10 +539,10 @@ def _run_phylogeny_pipeline(
         logger.warning("--phylogeny: one or both partition FASTAs empty; skipping phylogeny.")
         return
 
-    # All phylogeny outputs go into output/phylogeny/ (combined FASTA, Squirrel, IQ-TREE, treefile, PDF)
+    # Phylogeny: one alignment + one tree in output/phylogeny/; all intermediates in work_dir (removed later)
     phylogeny_dir = args.output / "phylogeny"
     phylogeny_dir.mkdir(parents=True, exist_ok=True)
-    combined_fa = phylogeny_dir / "phylogeny_combined.fa"
+    combined_fa = work_dir / "phylogeny_combined.fa"
     line_len = 80
     seen_ref: Dict[str, int] = {}
     with open(combined_fa, "w") as out:
@@ -563,23 +565,24 @@ def _run_phylogeny_pipeline(
             for i in range(0, len(seq), line_len):
                 out.write(seq[i : i + line_len] + "\n")
 
-    logger.info("Wrote combined FASTA for phylogeny: %s (refs + %s + %s partitions)", combined_fa, ref1_label, ref2_label)
+    logger.info("Wrote combined FASTA for phylogeny (refs + %s + %s partitions)", ref1_label, ref2_label)
 
-    # Squirrel alignment (output in work_dir so it is removed; we keep only the alignment in phylogeny/)
+    # Squirrel alignment in work_dir
     squirrel_out_phy = work_dir / "phylogeny_squirrel"
     squirrel_out_phy.mkdir(parents=True, exist_ok=True)
-    aln_stem = combined_fa.stem + ".aln.fasta"
-    expected_aln = squirrel_out_phy / aln_stem
+    expected_aln = squirrel_out_phy / (combined_fa.stem + ".aln.fasta")
     _run_squirrel(squirrel_clade, combined_fa, squirrel_out_phy, expected_aln)
     if not expected_aln.exists():
         logger.error("--phylogeny: Squirrel did not produce %s", expected_aln)
         sys.exit(1)
-    # Copy alignment into phylogeny/ so IQ-TREE runs from there (squirrel_out not kept)
-    aln_in_phylogeny = phylogeny_dir / aln_stem
+    # Single alignment in phylogeny/ (logical name)
+    aln_in_phylogeny = phylogeny_dir / "phylogeny_alignment.fasta"
     shutil.copy(expected_aln, aln_in_phylogeny)
 
-    # IQ-TREE: -s alignment -m GTR -bb 1000
-    iqtree_prefix = phylogeny_dir / "alignment"
+    # IQ-TREE in work_dir (so only one treefile ends up in phylogeny/)
+    iqtree_dir = work_dir / "phylogeny_iqtree"
+    iqtree_dir.mkdir(parents=True, exist_ok=True)
+    iqtree_prefix = iqtree_dir / "alignment"
     try:
         # -pre: output file prefix (alignment.treefile, alignment.iqtree, alignment.log, etc.)
         # -czb: collapse zero-length branches into polytomies
@@ -587,7 +590,7 @@ def _run_phylogeny_pipeline(
             "iqtree",
             "-s", str(aln_in_phylogeny),
             "-m", "GTR",
-            "-bb", "1000",
+            "-bb", "10000",
             "-pre", str(iqtree_prefix),
             "-czb",
         ]
@@ -609,64 +612,70 @@ def _run_phylogeny_pipeline(
         logger.error("--phylogeny: IQ-TREE did not produce treefile at %s", treefile)
         sys.exit(1)
 
-    # Midpoint root and write tree + PDF into output/phylogeny/
+    # Midpoint root and PDF via R only (root_tree_figure.R); IQ-TREE outputs alignment.treefile
     out_tree_path = phylogeny_dir / "phylogeny_tree.treefile"
     pdf_path = phylogeny_dir / "phylogeny_tree.pdf"
+    svg_path = phylogeny_dir / "phylogeny_tree.svg"
+    r_figure_pdf = phylogeny_dir / "tree_figure.pdf"
+    r_figure_svg = phylogeny_dir / "tree_figure.svg"
+    r_rooted = phylogeny_dir / "rooted.tree"
     pdf_written = False
     midpoint_rooted = False
-    try:
-        # Headless: use Qt offscreen so PDF can be rendered without a display
-        os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
-        from ete3 import Tree, NodeStyle, TreeStyle
-        t = Tree(str(treefile))
+
+    # R expects input tree in phylogeny dir; use temp name then keep only final outputs
+    tree_in_phylogeny = phylogeny_dir / "alignment.treefile"
+    if not treefile.exists():
+        logger.error("--phylogeny: IQ-TREE treefile not found at %s", treefile)
+        sys.exit(1)
+    shutil.copy(treefile, tree_in_phylogeny)
+
+    if ROOT_TREE_FIGURE_R.exists():
         try:
-            R = t.get_midpoint_outgroup()
-            # Only set outgroup if R is not already the root (avoids "Cannot set myself as outgroup")
-            if R is not t:
-                t.set_outgroup(R)
+            logger.info("Running R script for midpoint rooting and tree figure (root_tree_figure.R)")
+            r_result = subprocess.run(
+                ["Rscript", str(ROOT_TREE_FIGURE_R), str(tree_in_phylogeny)],
+                cwd=str(phylogeny_dir),
+                timeout=300,
+                capture_output=True,
+                text=True,
+            )
+            if r_result.returncode == 0 and r_rooted.exists():
+                shutil.copy(r_rooted, out_tree_path)
                 midpoint_rooted = True
-            else:
-                # Fallback: midpoint was the root; root on one of the root's children so tree is rooted
-                if t.children:
-                    t.set_outgroup(t.children[0])
-                    midpoint_rooted = True
-                    logger.info("Midpoint was current root; rooted on alternate branch so tree is rooted.")
-            if not midpoint_rooted:
-                logger.warning("Midpoint outgroup is the current root; tree left unrooted.")
-        except Exception as e:
-            logger.warning("Midpoint rooting failed: %s; tree left unrooted.", e)
-        # Always write the tree we have (rooted or unrooted) so FigTree opens it as-is
-        if midpoint_rooted:
-            t.write(outfile=str(out_tree_path))
-            logger.info("Wrote midpoint-rooted tree: %s", out_tree_path)
-        else:
+                if r_figure_pdf.exists():
+                    shutil.copy(r_figure_pdf, pdf_path)
+                    pdf_written = True
+                if r_figure_svg.exists():
+                    shutil.copy(r_figure_svg, svg_path)
+                logger.info("Midpoint-rooted tree and PDF from R: %s", out_tree_path)
+            elif r_result.returncode != 0 and r_result.stderr:
+                logger.warning("R tree figure script failed: %s", r_result.stderr[:200])
+                shutil.copy(treefile, out_tree_path)
+                logger.info("Wrote tree (unrooted): %s", out_tree_path)
+        except FileNotFoundError:
+            logger.warning("Rscript not found; install R and run root_tree_figure.R for midpoint root and PDF")
             shutil.copy(treefile, out_tree_path)
             logger.info("Wrote tree (unrooted): %s", out_tree_path)
+        except subprocess.TimeoutExpired:
+            logger.warning("R tree figure script timed out.")
+            shutil.copy(treefile, out_tree_path)
+            logger.info("Wrote tree (unrooted): %s", out_tree_path)
+        except Exception as r_e:
+            logger.warning("R tree figure failed: %s", r_e)
+            shutil.copy(treefile, out_tree_path)
+            logger.info("Wrote tree (unrooted): %s", out_tree_path)
+    else:
+        logger.warning("root_tree_figure.R not found at %s; writing unrooted tree", ROOT_TREE_FIGURE_R)
+        shutil.copy(treefile, out_tree_path)
+        logger.info("Wrote tree (unrooted): %s", out_tree_path)
 
-        # PDF in phylogeny folder: tips as circles; extracted tracts = dark red/pink, references = grey
-        TRACT_COLOR = "#C71585"   # dark red-pink (medium violet red) for each extracted tract
-        REF_COLOR = "#808080"     # grey for references
-        for node in t.traverse():
-            if node.is_leaf():
-                nstyle = NodeStyle()
-                nstyle["shape"] = "circle"
-                nstyle["size"] = 4
-                name = node.name or ""
-                nstyle["fgcolor"] = TRACT_COLOR if "_tracts" in name else REF_COLOR
-                node.set_style(nstyle)
-        ts = TreeStyle()
-        t.render(str(pdf_path), w=800, units="px", tree_style=ts)
-        pdf_written = pdf_path.exists()
-        if pdf_written:
-            logger.info("Wrote phylogeny tree PDF: %s", pdf_path)
-    except ImportError:
-        logger.warning("ete3 not installed; skipping midpoint rooting and PDF. Install with: pip install ete3")
-        if not out_tree_path.exists() and treefile.exists():
-            shutil.copy(treefile, out_tree_path)
-    except Exception as e:
-        logger.warning("ete3 tree plot failed: %s; PDF would be at %s (open .treefile in FigTree to export PDF).", e, pdf_path)
-        if not out_tree_path.exists() and treefile.exists():
-            shutil.copy(treefile, out_tree_path)
+    # Keep only: phylogeny_alignment.fasta, phylogeny_tree.treefile, phylogeny_tree.pdf, phylogeny_tree.svg
+    for f in (tree_in_phylogeny, r_rooted, r_figure_pdf, r_figure_svg):
+        if f.exists():
+            try:
+                f.unlink()
+            except OSError:
+                pass
 
     root_label = "midpoint-rooted tree" if midpoint_rooted else "tree (unrooted)"
     if pdf_written:
@@ -922,6 +931,9 @@ def _write_results_html(
     ref2_spec: Optional[str] = None,
     diagnostic_snp_positions: Optional[List[int]] = None,
     genome_length: Optional[int] = None,
+    phylogeny_pdf_path: Optional[Path] = None,
+    phylogeny_pdf_base64: Optional[str] = None,
+    phylogeny_svg_content: Optional[str] = None,
 ) -> None:
     """Write Virasign-style HTML: container, gradient header, sortable table, Chart.js stacked bar, recombinant column."""
     import json
@@ -1213,6 +1225,31 @@ def _write_results_html(
             '</div></details>'
         ).format(n_snps=n_snps, genome_length=genome_length, display_length=display_length)
 
+    phylogeny_section_html = ""
+    if phylogeny_svg_content or phylogeny_pdf_base64:
+        # Prefer inline SVG (no PDF viewer frame); fall back to PDF embed if no SVG
+        svg_safe = (phylogeny_svg_content or "").replace("</script>", "<\\/script>")
+        pdf_data_uri = ("data:application/pdf;base64," + phylogeny_pdf_base64) if phylogeny_pdf_base64 else ""
+        download_btn = (
+            f'<a class="pdf-btn" href="{pdf_data_uri}" download="phylogeny_tree.pdf" onclick="event.stopPropagation()">&#8595; Download PDF</a>'
+            if pdf_data_uri else ""
+        )
+        if svg_safe:
+            body_content = '<div class="phylogeny-svg-container">' + svg_safe + "</div>"
+        elif pdf_data_uri:
+            body_content = f'<embed src="{pdf_data_uri}" type="application/pdf" width="100%" height="800" style="max-width:100%; border-radius:8px; border:1px solid #dee2e6;" />'
+        else:
+            body_content = ""
+        phylogeny_section_html = (
+            '<details class="collapsible-section" open id="phylogenySection">'
+            "<summary><h2>Phylogeny of recombinant ancestors</h2>"
+            + download_btn
+            + "</summary>"
+            '<div class="section-inner chart-section">'
+            + body_content
+            + "</div></details>"
+        )
+
     html = f"""<!DOCTYPE html>
 <html lang="en">
 <head>
@@ -1239,6 +1276,8 @@ body {{ font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans
 .stat-box .number {{ font-size: 1.8em; font-weight: bold; color: #667eea; }}
 .stat-box .label {{ color: #6c757d; font-size: 0.9em; margin-top: 4px; }}
 .chart-section {{ margin-bottom: 30px; background: #fff; padding: 20px; border-radius: 8px; box-shadow: 0 2px 8px rgba(0,0,0,0.08); }}
+.phylogeny-svg-container {{ margin-top: 10px; overflow-x: auto; max-width: 100%; border-radius: 8px; border: 1px solid #dee2e6; }}
+.phylogeny-svg-container svg {{ max-width: 100%; height: auto; display: block; }}
 .chart-legend {{ display: flex; align-items: center; gap: 8px; flex-wrap: wrap; margin-top: 8px; margin-bottom: 10px; font-size: 0.9em; color: #495057; }}
 .chart-legend-item {{ display: inline-block; width: 14px; height: 14px; border-radius: 2px; vertical-align: middle; }}
 .snp-positions-wrapper {{ margin-top: 10px; overflow-x: auto; }}
@@ -1376,6 +1415,7 @@ tr.recombinant {{ }}
 {snp_positions_section_html}
 {rec_sites_html}
 {breakpoints_section_html}
+{phylogeny_section_html}
 </div>
 </div>
 <script>
@@ -1836,7 +1876,7 @@ Examples:
         type=float,
         default=MINOR_REF_PCT_THRESHOLD,
         metavar="",
-        help=f"Minor reference %% threshold for calling 'potential recombinant' (default: {MINOR_REF_PCT_THRESHOLD:g}).",
+        help=f"Minor reference %% threshold for calling 'potential recombinant' (default: {MINOR_REF_PCT_THRESHOLD:g})",
     )
     optional.add_argument(
         "-b",
@@ -1845,12 +1885,12 @@ Examples:
         action="store_const",
         const=2,
         default=1,
-        help="Ignore single-SNP runs when inferring breakpoints (with -b: minimum consecutive diagnostic SNPs per tract = 2; default without -b: 1).",
+        help="Ignore single-SNP runs when inferring breakpoints (with -b: minimum consecutive diagnostic SNPs per tract = 2; default without -b: 1)",
     )
     required.add_argument("-i", "-input", dest="input", type=Path, default=None, metavar="", help="FASTA file, directory of .fa/.fasta/.fna, .txt file of accessions (one per line or comma-separated), NCBI accession, or comma-separated accessions (e.g. -i ACC1,ACC2 or -i accessions.txt)")
-    required.add_argument("-ref", dest="ref", type=str, default=None, metavar="", help="Reference pair: two comma-separated labels among Ia, Ib, IIa, IIb (e.g. Ia,Ib or Ib,IIb). Uses built-in defaults. Either -ref or both -ref1 and -ref2 are required.")
-    required.add_argument("-ref1", type=str, default=None, metavar="", help="First reference: FASTA path or NCBI accession; overrides ref1 when using -ref. Required if -ref is not used.")
-    required.add_argument("-ref2", type=str, default=None, metavar="", help="Second reference: FASTA path or NCBI accession; overrides ref2 when using -ref. Required if -ref is not used.")
+    required.add_argument("-ref", dest="ref", type=str, default=None, metavar="", help="Reference pair: two comma-separated labels among Ia, Ib, IIa, IIb (e.g. Ia,Ib or Ib,IIb). Uses built-in defaults. Either -ref or both -ref1 and -ref2 are required")
+    required.add_argument("-ref1", type=str, default=None, metavar="", help="First reference: FASTA path or NCBI accession; overrides ref1 when using -ref. Required if -ref is not used")
+    required.add_argument("-ref2", type=str, default=None, metavar="", help="Second reference: FASTA path or NCBI accession; overrides ref2 when using -ref. Required if -ref is not used")
     optional.add_argument("-o", "-output", dest="output_dir", type=str, default="output", metavar="", help="Output directory (default: output); path is relative to cwd; always removed and recreated at start of each run")
     optional.add_argument("-ref1_g", type=str, default=None, metavar="", help="Genotype label for ref1 (TSV/HTML column headers; default from -ref or ref1 accession)")
     optional.add_argument("-ref2_g", type=str, default=None, metavar="", help="Genotype label for ref2 (TSV/HTML column headers; default from -ref or ref2 accession)")
@@ -1862,13 +1902,13 @@ Examples:
         "-extract-tracts",
         action="store_true",
         dest="extract_tracts",
-        help="Split recombinant genomes by ancestry.",
+        help="Split recombinant genomes by ancestry",
     )
     optional.add_argument(
         "-phylogeny",
         action="store_true",
         dest="phylogeny",
-        help="After extract-tracts: merge refs + two partition FASTAs, align with Squirrel, run IQ-TREE (GTR, 1k bootstrap), midpoint-root, and export tree PDF with partition tips in dark pink.",
+        help="Phylogeny of recombinant ancestors",
     )
     # If called with no arguments, show help (same output as --help) instead of erroring.
     if len(sys.argv) == 1:
@@ -2187,31 +2227,6 @@ Examples:
         "%% other = diagnostic sites where the query neither matched %s nor %s (different base or gap/N count as other)."
     ) % (ref1_label, ref2_label)
 
-    # HTML: one file if <= HTML_CHUNK_SIZE genomes, else one file per chunk of 100 (overzichtelijk)
-    html_files: List[Path] = []
-    n_snps = len(diagnostic_snps)
-    if len(results) <= HTML_CHUNK_SIZE:
-        out_html = args.output / "recmpox_results.html"
-        _write_results_html(out_html, results, ref1_label, ref2_label, recombinant_threshold_note, other_explanation, is_intra_clade, minor_threshold, breakpoint_min_consecutive_snps=int(getattr(args, "breakpoint_min_snps", 1)), n_diagnostic_snps=n_snps, n_indel_columns=n_indel_columns, ref1_spec=args.ref1, ref2_spec=args.ref2, diagnostic_snp_positions=[p for (p, _, _) in diagnostic_snps], genome_length=ref_len)
-        html_files.append(out_html)
-        logger.info("Wrote %s", out_html)
-    else:
-        chunks = [results[i:i + HTML_CHUNK_SIZE] for i in range(0, len(results), HTML_CHUNK_SIZE)]
-        for part, chunk in enumerate(chunks, start=1):
-            out_html = args.output / f"recmpox_results_{part}.html"
-            _write_results_html(out_html, chunk, ref1_label, ref2_label, recombinant_threshold_note, other_explanation, is_intra_clade, minor_threshold, breakpoint_min_consecutive_snps=int(getattr(args, "breakpoint_min_snps", 1)), part_index=part, total_parts=len(chunks), n_diagnostic_snps=n_snps, n_indel_columns=n_indel_columns, ref1_spec=args.ref1, ref2_spec=args.ref2, diagnostic_snp_positions=[p for (p, _, _) in diagnostic_snps], genome_length=ref_len)
-            html_files.append(out_html)
-            logger.info("Wrote %s (%d genomes)", out_html, len(chunk))
-        # Index page linking to all parts
-        index_path = args.output / "recmpox_results_index.html"
-        with open(index_path, "w") as f:
-            f.write("<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><title>RecMpox Results – Index</title></head><body><h1>RecMpox Results</h1><p>%d genomes in %d parts (max %d per file).</p><ul>\n" % (len(results), len(chunks), HTML_CHUNK_SIZE))
-            for part in range(1, len(chunks) + 1):
-                f.write('<li><a href="recmpox_results_%d.html#diagnosticStripsSection">Part %d of %d</a> (table + bar chart + diagnostic strips)</li>\n' % (part, part, len(chunks)))
-            f.write("</ul></body></html>")
-        logger.info("Wrote %s", index_path)
-        html_files.insert(0, index_path)
-
     # Optional: extract per-clade tract sequences for potential recombinants (Ia-only / Ib-only positions)
     if getattr(args, "extract_tracts", False):
         if not getattr(args, "include_indels", False):
@@ -2220,7 +2235,7 @@ Examples:
                 "clade-specific deletions are included in tract boundaries."
             )
         _extract_tract_sequences(
-            out_dir=args.output / "extracted_tracts",
+            out_dir=args.output / "tracts",
             results=results,
             alignments_queries=alignments_queries,
             ref1_label=ref1_label,
@@ -2232,6 +2247,45 @@ Examples:
     # Optional: phylogeny from refs + two partition FASTAs (requires extract-tracts)
     if getattr(args, "phylogeny", False):
         _run_phylogeny_pipeline(args, work_dir, ref1_label, ref2_label, squirrel_clade)
+
+    # HTML: one file if <= HTML_CHUNK_SIZE genomes, else one file per chunk (written after phylogeny so PDF can be included)
+    html_files: List[Path] = []
+    n_snps = len(diagnostic_snps)
+    phylogeny_pdf = (args.output / "phylogeny" / "phylogeny_tree.pdf") if getattr(args, "phylogeny", False) else None
+    phylogeny_svg = (args.output / "phylogeny" / "phylogeny_tree.svg") if getattr(args, "phylogeny", False) else None
+    phylogeny_pdf_b64: Optional[str] = None
+    phylogeny_svg_content: Optional[str] = None
+    if phylogeny_pdf and phylogeny_pdf.exists():
+        try:
+            phylogeny_pdf_b64 = base64.b64encode(phylogeny_pdf.read_bytes()).decode("ascii")
+        except OSError:
+            pass
+    if phylogeny_svg and phylogeny_svg.exists():
+        try:
+            phylogeny_svg_content = phylogeny_svg.read_text(encoding="utf-8")
+        except OSError:
+            pass
+    if len(results) <= HTML_CHUNK_SIZE:
+        out_html = args.output / "recmpox_results.html"
+        _write_results_html(out_html, results, ref1_label, ref2_label, recombinant_threshold_note, other_explanation, is_intra_clade, minor_threshold, breakpoint_min_consecutive_snps=int(getattr(args, "breakpoint_min_snps", 1)), n_diagnostic_snps=n_snps, n_indel_columns=n_indel_columns, ref1_spec=args.ref1, ref2_spec=args.ref2, diagnostic_snp_positions=[p for (p, _, _) in diagnostic_snps], genome_length=ref_len, phylogeny_pdf_path=phylogeny_pdf, phylogeny_pdf_base64=phylogeny_pdf_b64, phylogeny_svg_content=phylogeny_svg_content)
+        html_files.append(out_html)
+        logger.info("Wrote %s", out_html)
+    else:
+        chunks = [results[i:i + HTML_CHUNK_SIZE] for i in range(0, len(results), HTML_CHUNK_SIZE)]
+        for part, chunk in enumerate(chunks, start=1):
+            out_html = args.output / f"recmpox_results_{part}.html"
+            _write_results_html(out_html, chunk, ref1_label, ref2_label, recombinant_threshold_note, other_explanation, is_intra_clade, minor_threshold, breakpoint_min_consecutive_snps=int(getattr(args, "breakpoint_min_snps", 1)), part_index=part, total_parts=len(chunks), n_diagnostic_snps=n_snps, n_indel_columns=n_indel_columns, ref1_spec=args.ref1, ref2_spec=args.ref2, diagnostic_snp_positions=[p for (p, _, _) in diagnostic_snps], genome_length=ref_len, phylogeny_pdf_path=phylogeny_pdf, phylogeny_pdf_base64=phylogeny_pdf_b64, phylogeny_svg_content=phylogeny_svg_content)
+            html_files.append(out_html)
+            logger.info("Wrote %s (%d genomes)", out_html, len(chunk))
+        # Index page linking to all parts
+        index_path = args.output / "recmpox_results_index.html"
+        with open(index_path, "w") as f:
+            f.write("<!DOCTYPE html><html lang=\"en\"><head><meta charset=\"UTF-8\"><title>RecMpox Results – Index</title></head><body><h1>RecMpox Results</h1><p>%d genomes in %d parts (max %d per file).</p><ul>\n" % (len(results), len(chunks), HTML_CHUNK_SIZE))
+            for part in range(1, len(chunks) + 1):
+                f.write('<li><a href="recmpox_results_%d.html#diagnosticStripsSection">Part %d of %d</a> (table + bar chart + diagnostic strips)</li>\n' % (part, part, len(chunks)))
+            f.write("</ul></body></html>")
+        logger.info("Wrote %s", index_path)
+        html_files.insert(0, index_path)
 
     with open(args.output / "diagnostic_snps.txt", "w") as f:
         f.write("position\tia_allele\tib_allele\n")

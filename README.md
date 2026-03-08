@@ -124,8 +124,12 @@ recmpox -i fasta/ -o output -ref Ia,Ib -include-indels
 - **potential_recombinants_diagnostic_sites.tsv**: Diagnostic site classification per potential recombinant (when any exist).
 - **diagnostic_snps.txt**: List of diagnostic SNP positions (ref1 vs ref2 alleles).
 - **.recmpox.log**: Log file (in output directory).
-- With **-extract-tracts**: **extracted_tracts/** — per-sample FASTA with only Ia tract positions (rest N) and only Ib tract positions (rest N).
-- With **-phylogeny**: **phylogeny/** folder containing all IQ-TREE outputs (e.g. alignment.treefile, alignment.log, alignment.iqtree), **phylogeny_tree.treefile** (midpoint-rooted so FigTree opens it rooted), and **phylogeny_tree.pdf** (tips as circles: dark red-pink = extracted tracts, grey = references). Intermediate files under `work/` are removed after the run.
+- With **-extract-tracts**: **tracts/** — per-sample FASTA with only Ia tract positions (rest N) and only Ib tract positions (rest N): `Ia_recombinant_ancestral_tract.fa`, `Ib_recombinant_ancestral_tract.fa` (clade names depend on -ref).
+- With **-phylogeny**: **phylogeny/** folder containing **phylogeny_alignment.fasta**, **phylogeny_tree.treefile** (midpoint-rooted), **phylogeny_tree.pdf**, and **phylogeny_tree.svg**. The pipeline runs a bundled R script (requires **ape**, **phytools**, **ggtree**, **ggplot2**). To test the R script on an existing tree (e.g. after a run where the R step failed), from your **output directory** run:
+  ```bash
+  Rscript /path/to/recmpox/references/root_tree_figure.R phylogeny/phylogeny_tree.treefile
+  ```
+  (Replace `/path/to/recmpox` with the RecMpox install or source path; the script writes **rooted.tree**, **tree_figure.pdf**, and **tree_figure.svg** into **phylogeny/**.)
 
 ## Interpretation
 

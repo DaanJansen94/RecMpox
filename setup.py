@@ -11,7 +11,7 @@ setup(
     long_description=long_description,
     long_description_content_type="text/markdown",
     packages=find_packages(),
-    package_data={"recmpox": ["references/*.fasta"]},
+    package_data={"recmpox": ["references/*.fasta", "references/*.R"]},
     python_requires=">=3.9",
     install_requires=[],  # matplotlib optional (for --plot)
     entry_points={
