@@ -29,6 +29,7 @@ import sys
 import urllib.error
 import urllib.parse
 import urllib.request
+import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
@@ -859,31 +860,64 @@ def _compute_merged_tracts(
     """Return merged, sustained recombination tracts from per-sample allegiances.
 
     Returns a list of (start_pos, end_pos, clade, n_snps) in alignment-column coordinates
-    (1-based).  Only tracts with >= min_consecutive SNPs are kept.
+    (1-based). Only tracts with >= min_consecutive SNPs are kept.
+
+    IMPORTANT: Tracts are built from *consecutive* diagnostic positions with the same
+    clade call (ia/ib) in the full series of diagnostic sites. Any intervening
+    'other'/ambiguous site breaks the tract – we no longer connect Ia…Ia or Ib…I
+    across an 'other' position.
     """
-    if not allegiances:
+    if not allegiances or not diagnostic_snp_positions:
         return []
-    runs, _ = get_runs_and_breakpoints(
-        allegiances, diagnostic_snp_positions,
-        min_consecutive=min_consecutive, ignore_other=True,
-    )
-    # First merge: collapse adjacent same-clade runs (gaps = "other"/ambiguous)
-    merged: List[Tuple[int, int, str, int]] = []
-    for start_pos, end_pos, clade, n_snps in runs:
-        if merged and merged[-1][2] == clade:
-            merged[-1] = (merged[-1][0], end_pos, clade, merged[-1][3] + n_snps)
+
+    # Map position -> allegiance for quick lookup
+    pos_to_all = {p: a for (p, a) in allegiances}
+
+    def _norm(a: str) -> str:
+        if a == "ia":
+            return "ia"
+        if a == "ib":
+            return "ib"
+        # Treat ambiguous / other_n / anything else as "other"
+        return "other"
+
+    tracts: List[Tuple[int, int, str, int]] = []
+    cur_clade: Optional[str] = None
+    cur_start: Optional[int] = None
+    cur_end: Optional[int] = None
+    cur_count: int = 0
+
+    for pos in sorted(diagnostic_snp_positions):
+        a_raw = pos_to_all.get(pos, "other")
+        a = _norm(a_raw)
+        if a in ("ia", "ib"):
+            if cur_clade == a:
+                # Extend current tract
+                cur_end = pos
+                cur_count += 1
+            else:
+                # Finish previous tract (if any)
+                if cur_clade in ("ia", "ib") and cur_start is not None and cur_end is not None:
+                    tracts.append((cur_start, cur_end, cur_clade, cur_count))
+                # Start new tract
+                cur_clade = a
+                cur_start = cur_end = pos
+                cur_count = 1
         else:
-            merged.append((start_pos, end_pos, clade, n_snps))
-    # Filter to sustained tracts
-    sustained = [m for m in merged if m[3] >= min_consecutive]
-    # Second merge: consecutive same-clade after short-run removal
-    merged_tracts: List[Tuple[int, int, str, int]] = []
-    for start_pos, end_pos, clade, n_snps in sustained:
-        if merged_tracts and merged_tracts[-1][2] == clade:
-            merged_tracts[-1] = (merged_tracts[-1][0], end_pos, clade, merged_tracts[-1][3] + n_snps)
-        else:
-            merged_tracts.append((start_pos, end_pos, clade, n_snps))
-    return merged_tracts
+            # 'other' / ambiguous / N → break any current tract
+            if cur_clade in ("ia", "ib") and cur_start is not None and cur_end is not None:
+                tracts.append((cur_start, cur_end, cur_clade, cur_count))
+            cur_clade = None
+            cur_start = None
+            cur_end = None
+            cur_count = 0
+
+    # Finalize last tract
+    if cur_clade in ("ia", "ib") and cur_start is not None and cur_end is not None and cur_count > 0:
+        tracts.append((cur_start, cur_end, cur_clade, cur_count))
+
+    # Keep only tracts with enough consecutive SNPs
+    return [t for t in tracts if t[3] >= min_consecutive]
 
 
 def _genome_ruler_html(genome_length: int, min_width: int) -> str:
@@ -2392,6 +2426,17 @@ Examples:
             f.write("</ul></body></html>")
         logger.info("Wrote %s", index_path)
         html_files.insert(0, index_path)
+
+    # Zip HTML report for easier sharing (e.g. email)
+    zip_path = args.output / "recmpox_results.zip"
+    try:
+        with zipfile.ZipFile(zip_path, "w", zipfile.ZIP_DEFLATED) as zf:
+            for p in html_files:
+                if p.exists():
+                    zf.write(p, arcname=p.name)
+        logger.info("Created %s (HTML report archive)", zip_path)
+    except OSError as e:
+        logger.warning("Could not create HTML zip %s: %s", zip_path, e)
 
     with open(args.output / "diagnostic_snps.txt", "w") as f:
         f.write("position\tia_allele\tib_allele\n")
