@@ -1004,10 +1004,17 @@ def _write_results_html(
     html_escape = (lambda s: str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;"))
     refs_summary_html = ""
     if ref1_spec or ref2_spec:
+        def _ref_display_name(spec: Optional[str]) -> str:
+            """Show filename only for file paths, else spec as-is (e.g. accession)."""
+            if not spec:
+                return spec or ""
+            return Path(spec).name if "/" in str(spec) else spec
+
         def _ref_box(label: str, spec: Optional[str]) -> str:
             if not spec:
                 return f'<div class="stat-box"><div class="number">{html_escape(label)}</div><div class="label">Ref</div></div>'
-            spec_esc = html_escape(spec)
+            display_spec = _ref_display_name(spec)
+            spec_esc = html_escape(display_spec)
             if _looks_like_accession(spec):
                 url = "https://www.ncbi.nlm.nih.gov/nuccore/" + urllib.parse.quote(spec, safe="")
                 content = f'<a class="accession-link" href="{url}" target="_blank" rel="noopener">{spec_esc}</a>'
@@ -1993,7 +2000,6 @@ def main() -> None:
         add_help=False,
         epilog="""
 Examples:
-  # Use built-in defaults (Ia=OZ254474.1, Ib=PP601219.1, IIa=OZ287284.1, IIb=NC_063383.1)
   recmpox -i fasta/ -o output -ref Ia,Ib
   recmpox -i OZ375330.1 -o output -ref Ib,IIb  # UK recombinant case example
   recmpox -i accessions.txt -o output -ref Ia,Ib
@@ -2027,7 +2033,7 @@ Examples:
         help="Ignore single-SNP runs when inferring breakpoints (with -b: minimum consecutive diagnostic SNPs per tract = 2; default without -b: 1)",
     )
     required.add_argument("-i", "-input", dest="input", type=Path, default=None, metavar="", help="FASTA file, directory of .fa/.fasta/.fna, .txt file of accessions (one per line or comma-separated), NCBI accession, or comma-separated accessions (e.g. -i ACC1,ACC2 or -i accessions.txt)")
-    required.add_argument("-ref", dest="ref", type=str, default=None, metavar="", help="Reference pair: two comma-separated labels among Ia, Ib, IIa, IIb (e.g. Ia,Ib or Ib,IIb). Uses built-in defaults. Either -ref or both -ref1 and -ref2 are required")
+    required.add_argument("-ref", dest="ref", type=str, default=None, metavar="", help="Reference pair: two comma-separated clades among Ia, Ib, IIa, IIb (e.g. Ia,Ib or Ib,IIb). Builds one consensus per clade from earliest 5 genomes (Pathoplexus; requires Squirrel/mafft). Either -ref or both -ref1 and -ref2 are required")
     required.add_argument("-ref1", type=str, default=None, metavar="", help="First reference: FASTA path or NCBI accession; overrides ref1 when using -ref. Required if -ref is not used")
     required.add_argument("-ref2", type=str, default=None, metavar="", help="Second reference: FASTA path or NCBI accession; overrides ref2 when using -ref. Required if -ref is not used")
     optional.add_argument("-o", "-output", dest="output_dir", type=str, default="output", metavar="", help="Output directory (default: output); path is relative to cwd; always removed and recreated at start of each run")
@@ -2140,6 +2146,31 @@ Examples:
     work_dir = args.output / "work"
     work_dir.mkdir(parents=True, exist_ok=True)
     setup_logging(args.output, verbose=not args.quiet)
+
+    # When -ref L1,L2: run consensus script (earliest 5 per clade → one consensus per clade) and use those FASTAs as ref1/ref2
+    if getattr(args, "ref", None):
+        L1 = ref1_g_resolved
+        L2 = ref2_g_resolved
+        consensus_dir = work_dir / "ref_consensus"
+        consensus_dir.mkdir(parents=True, exist_ok=True)
+        script_path = Path(__file__).resolve().parent / "scripts" / "download_earliest_consensus.py"
+        if not script_path.is_file():
+            logger.error("Consensus script not found: %s", script_path)
+            sys.exit(1)
+        cmd = [sys.executable, str(script_path), "--clades", L1, L2, "--out-dir", str(consensus_dir)]
+        logger.info("Building consensus references: %s", " ".join(cmd))
+        rc = subprocess.run(cmd)
+        if rc.returncode != 0:
+            logger.error("Consensus script failed (exit %s)", rc.returncode)
+            sys.exit(1)
+        _CONSENSUS_FILENAME = {"Ia": "sh2024Ia.fa", "Ib": "sh2023Ib.fa", "IIa": "iia.fa", "IIb": "sh2017IIb.fa"}
+        p1 = consensus_dir / _CONSENSUS_FILENAME[L1]
+        p2 = consensus_dir / _CONSENSUS_FILENAME[L2]
+        if not p1.is_file() or not p2.is_file():
+            logger.error("Consensus files not produced: %s, %s", p1, p2)
+            sys.exit(1)
+        args.ref1 = str(p1)
+        args.ref2 = str(p2)
 
     ref_ia_path = resolve_ref(args.ref1, work_dir, "1")
     ref_ib_path = resolve_ref(args.ref2, work_dir, "2")

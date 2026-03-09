@@ -74,7 +74,7 @@ conda activate recmpox
 ### Basic usage
 
 ```bash
-# Use built-in references: Ia vs Ib or IIa vs IIb (sequences downloaded automatically)
+# Use built-in references: consensus of 5 earliest genomes obtained from sustained outbreaks
 recmpox -i fasta/ -o output -ref Ia,Ib -t 4
 recmpox -i fasta/ -o output -ref Ib,IIb -t 4
 
