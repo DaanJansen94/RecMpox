@@ -315,7 +315,7 @@ def get_query_allegiance_from_alignment(
 ) -> List[Tuple[int, str]]:
     """
     At each diagnostic (pos, ia_allele, ib_allele), get query base from alignment column (1-based).
-    N, gap, or other ambiguous -> 'ambiguous'. Same allegiance rules as get_query_allegiance.
+    N -> 'other_n'; other non-ACGT/gap -> 'ambiguous'. Same allegiance rules as get_query_allegiance.
     If diagnostic_indels is provided, append one allegiance per column in each indel (each position counts as a site).
     """
     if len(query_seq) < ref_length:
@@ -327,10 +327,12 @@ def get_query_allegiance_from_alignment(
             result.append((pos, "ambiguous"))
             continue
         q = query_seq[idx].upper()
-        if q not in "ACGT-":
-            result.append((pos, "ambiguous"))
-            continue
+        # Treat N explicitly as its own "other_n" category so we can split
+        # "other (all)" vs "other (N's)" in the HTML report.
         if q == "N":
+            result.append((pos, "other_n"))
+            continue
+        if q not in "ACGT-":
             result.append((pos, "ambiguous"))
             continue
         # Same allegiance logic as get_query_allegiance
@@ -419,20 +421,22 @@ def get_query_allegiance(
     return result
 
 
-def allegiance_summary(positions_allegiances: List[Tuple[int, str]]) -> Tuple[int, int, int]:
-    """Return (n_ia, n_ib, n_ambiguous) over all diagnostic SNPs."""
+def allegiance_summary(positions_allegiances: List[Tuple[int, str]]) -> Tuple[int, int, int, int]:
+    """Return (n_ia, n_ib, n_other, n_other_n) over all diagnostic sites. n_other = ambiguous + other_n."""
     n_ia = sum(1 for _, a in positions_allegiances if a == "ia")
     n_ib = sum(1 for _, a in positions_allegiances if a == "ib")
     n_amb = sum(1 for _, a in positions_allegiances if a == "ambiguous")
-    return (n_ia, n_ib, n_amb)
+    n_other_n = sum(1 for _, a in positions_allegiances if a == "other_n")
+    n_other = n_amb + n_other_n
+    return (n_ia, n_ib, n_other, n_other_n)
 
 
 def allegiance_summary_snp_only(
     positions_allegiances: List[Tuple[int, str]],
     diagnostic_snp_positions: List[int],
-) -> Tuple[int, int, int]:
+) -> Tuple[int, int, int, int]:
     """
-    Return (n_ia, n_ib, n_ambiguous) over diagnostic SNP positions only (excludes indel columns).
+    Return (n_ia, n_ib, n_other, n_other_n) over diagnostic SNP positions only (excludes indel columns).
     Use this to classify consensus as Ia/Ib from SNP percentages so that poor coverage
     in deletion regions (often 'N') does not inflate 'other'.
     """

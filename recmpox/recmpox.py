@@ -1049,7 +1049,7 @@ def _write_results_html(
 
     # Build list of dicts per row for JS (exclude allegiances to keep JSON small)
     # Flatten tuple keys (merged display columns) and always include chart keys
-    _chart_keys = {"id", "pct_ia", "pct_ib", "pct_other"}
+    _chart_keys = {"id", "pct_ia", "pct_ib", "pct_other", "n_ia", "n_ib", "n_other", "n_other_n"}
     _data_keys = {k for c in cols for k in (c[0] if isinstance(c[0], tuple) else (c[0],))} | _chart_keys
     data_list = [{k: r.get(k, "") for k in _data_keys} for r in results]
     data_json = json.dumps(data_list).replace("</", "<\\/")
@@ -1073,7 +1073,15 @@ def _write_results_html(
         sorted_alle = sorted(allegiances, key=lambda x: x[0])
         strip_segments = ""
         for (pos, allegiance) in sorted_alle:
-            cls = "ia" if allegiance == "ia" else ("ib" if allegiance == "ib" else "other")
+            # Use "other-n" for N's so the strip filter can show only N segments when "Other (N's)" is selected
+            if allegiance == "ia":
+                cls = "ia"
+            elif allegiance == "ib":
+                cls = "ib"
+            elif allegiance == "other_n":
+                cls = "other other-n"
+            else:
+                cls = "other"
             lbl = ref1_label if allegiance == "ia" else (ref2_label if allegiance == "ib" else "other")
             pct = pos / display_length * 100 if display_length else 0
             strip_segments += f'<span class="strip-segment {cls}" title="{pos} bp – {html_escape(lbl)}" style="left:{pct:.3f}%"></span>'
@@ -1089,16 +1097,20 @@ def _write_results_html(
             f'<p class="threshold-note">Tracts = consecutive diagnostic sites with same classification. One row per tract.</p>'
             f'<table class="rec-sites-table"><thead><tr><th>Start (bp)</th><th>End (bp)</th><th>Clade</th><th>Sites</th></tr></thead><tbody>'
         )
-        # Group consecutive positions with same allegiance into tracts
+        # Group consecutive positions with same allegiance into tracts (treat other_n and ambiguous as "other")
+        def _eff_allegiance(a: str) -> str:
+            return "other" if a in ("ambiguous", "other_n") else a
+
         i = 0
         while i < len(sorted_alle):
             start_pos, allegiance = sorted_alle[i]
             end_pos = start_pos
+            eff = _eff_allegiance(allegiance)
             j = i + 1
-            while j < len(sorted_alle) and sorted_alle[j][1] == allegiance:
+            while j < len(sorted_alle) and _eff_allegiance(sorted_alle[j][1]) == eff:
                 end_pos = sorted_alle[j][0]
                 j += 1
-            label = ref1_label if allegiance == "ia" else (ref2_label if allegiance == "ib" else "other")
+            label = ref1_label if eff == "ia" else (ref2_label if eff == "ib" else "other")
             n_sites = j - i
             rec_sites_html += f'<tr><td class="num">{start_pos}</td><td class="num">{end_pos}</td><td>{html_escape(label)}</td><td class="num">{n_sites}</td></tr>'
             i = j
@@ -1112,6 +1124,15 @@ def _write_results_html(
             '<details class="collapsible-section diagnostic-strips-chart" open id="diagnosticStripsSection">'
             f'<summary><h2>Classification of diagnostic sites per sample</h2><button class="pdf-btn" onclick="event.stopPropagation();exportStripSvg(\'diagnosticStripsSection\',\'diagnosticStripsContainer\',\'Classification of diagnostic sites per sample\',\'{html_escape(ref1_label)}\',\'{html_escape(ref2_label)}\')">&#8595; Download SVG</button></summary>'
             '<div class="section-inner chart-section">'
+            '<div class="strip-classification-filter-wrap">'
+            '<label class="strip-filter-check-label"><input type="checkbox" id="stripClassificationFilterCheck" aria-describedby="stripClassificationOptions"> Filter strips by classification</label>'
+            '<div id="stripClassificationOptions" class="strip-classification-options" aria-hidden="true">'
+            '<label><input type="checkbox" class="strip-class-opt" data-filter="ia"> {ref1}</label>'
+            '<label><input type="checkbox" class="strip-class-opt" data-filter="ib"> {ref2}</label>'
+            '<label><input type="checkbox" class="strip-class-opt" data-filter="other_all"> Other (all)</label>'
+            '<label><input type="checkbox" class="strip-class-opt" data-filter="other_n"> Other (N\'s)</label>'
+            '</div>'
+            '</div>'
             '<p class="threshold-note">One strip per consensus: each segment = one diagnostic site in genomic order. <span id="stripFilterCount" aria-live="polite"></span></p>'
             '<p class="threshold-note">{ref1} (blue), {ref2} (orange), other (gray).</p>'
             '<div class="strip-legend"><span class="strip-legend-ia"></span> {ref1} &nbsp; <span class="strip-legend-ib"></span> {ref2} &nbsp; <span class="strip-legend-other"></span> other</div>'
@@ -1331,6 +1352,8 @@ tr.recombinant {{ }}
 .strip-segment.ia {{ background: #4A90D9; }}
 .strip-segment.ib {{ background: #E89B3C; }}
 .strip-segment.other {{ background: #95a5a6; }}
+.strip-segment.other-n {{ background: #95a5a6; }}
+.strip-segment.segment-hidden-by-filter {{ display: none; }}
 .strip-segment.region-segment {{ min-width: 4px; border-radius: 3px; }}
 .strip-segment.breakpoint-marker {{ width: 4px; background: #c0392b; transform: translateX(-50%); }}
 #breakpointsStripsContainer .rec-sites-section {{ background: linear-gradient(135deg, #fafbfc 0%, #f4f6f9 100%); border-left: 4px solid #dee2e6; box-shadow: 0 1px 4px rgba(0,0,0,0.05); transition: box-shadow 0.15s; }}
@@ -1341,6 +1364,12 @@ tr.recombinant {{ }}
 .strip-legend-ib {{ display: inline-block; width: 14px; height: 14px; background: #E89B3C; border-radius: 2px; }}
 .strip-legend-other {{ display: inline-block; width: 14px; height: 14px; background: #95a5a6; border-radius: 2px; }}
 .strip-legend-gap {{ display: inline-block; width: 14px; height: 14px; background: linear-gradient(135deg, #c4d3e0, #b6c8d7); border: 1px solid #9fb8cc; border-radius: 2px; }}
+.strip-classification-filter-wrap {{ display: flex; flex-wrap: wrap; align-items: center; justify-content: flex-end; gap: 12px 20px; margin-bottom: 12px; padding: 10px 12px; background: #f8f9fa; border-radius: 6px; border: 1px solid #e9ecef; }}
+.strip-classification-filter-wrap label {{ font-size: 0.95em; color: #495057; cursor: pointer; white-space: nowrap; }}
+.strip-classification-filter-wrap input[type="checkbox"] {{ margin-right: 6px; vertical-align: middle; }}
+.strip-classification-options {{ display: none; gap: 12px 20px; flex-wrap: wrap; align-items: center; }}
+.strip-classification-options[aria-hidden="false"] {{ display: flex; }}
+.strip-filter-check-label {{ font-weight: 600; }}
 .strip-ruler {{ position: relative; width: 100%; height: 22px; min-width: 200px; margin-top: 3px; }}
 .ruler-tick {{ position: absolute; transform: translateX(-50%); font-size: 0.67em; font-weight: 500; color: #6c757d; white-space: nowrap; line-height: 1; padding-top: 6px; letter-spacing: 0.01em; }}
 .ruler-tick::before {{ content: ''; display: block; position: absolute; top: 0; left: 50%; transform: translateX(-50%); width: 1px; height: 5px; background: #adb5bd; }}
@@ -1622,12 +1651,65 @@ function exportStripSvg(sectionId, containerId, figTitle, ref1Label, ref2Label) 
         if (ri !== null) visibleRows.add(ri);
       }}
     }});
+    var stripFilterCheck = document.getElementById("stripClassificationFilterCheck");
+    var stripOpts = document.querySelectorAll(".strip-class-opt:checked");
+    // When "Filter strips by classification" is checked: figure is empty until you pick Ia, Ib, etc.
+    // When unchecked: show everything.
+    var stripClassificationOn = stripFilterCheck && stripFilterCheck.checked;
+    function rowMatchesStripClassification(ri) {{
+      if (!stripClassificationOn || !data[ri]) return true;
+      var r = data[ri];
+      var n_ia = (r.n_ia != null) ? (parseInt(r.n_ia, 10) || 0) : 0;
+      var n_ib = (r.n_ib != null) ? (parseInt(r.n_ib, 10) || 0) : 0;
+      var n_other = (r.n_other != null) ? (parseInt(r.n_other, 10) || 0) : 0;
+      var n_other_n = (r.n_other_n != null) ? (parseInt(r.n_other_n, 10) || 0) : 0;
+      var hasOtherAll = n_other > 0;
+      var hasOtherN = n_other_n > 0;
+      for (var i = 0; i < stripOpts.length; i++) {{
+        var f = stripOpts[i].getAttribute("data-filter");
+        if (f === "ia" && n_ia > 0) return true;
+        if (f === "ib" && n_ib > 0) return true;
+        if (f === "other_all" && hasOtherAll) return true;
+        if (f === "other_n" && hasOtherN) return true;
+      }}
+      return false;
+    }}
+    var stripVisibleRows = new Set();
+    visibleRows.forEach(function(ri) {{
+      if (rowMatchesStripClassification(ri)) stripVisibleRows.add(ri);
+    }});
+    // When filter is on but no option selected, show nothing; when options selected, show matching rows
+    var rowsForStrips = !stripClassificationOn ? visibleRows : (stripOpts.length > 0 ? stripVisibleRows : new Set());
     var container = document.getElementById("diagnosticStripsContainer");
     if (container) {{
       var sections = container.querySelectorAll(".rec-sites-section");
+      var showIa = false, showIb = false, showOtherAll = false, showOtherN = false;
+      for (var i = 0; i < stripOpts.length; i++) {{
+        var f = stripOpts[i].getAttribute("data-filter");
+        if (f === "ia") showIa = true;
+        if (f === "ib") showIb = true;
+        if (f === "other_all") showOtherAll = true;
+        if (f === "other_n") showOtherN = true;
+      }}
       sections.forEach(function(sec) {{
         var ri = sec.getAttribute("data-row");
-        sec.classList.toggle("hidden", !visibleRows.has(ri));
+        var sectionVisible = rowsForStrips.has(ri);
+        sec.classList.toggle("hidden", !sectionVisible);
+        var stripGenome = sec.querySelector(".strip-genome:not(.breakpoints-strip)");
+        if (stripGenome) {{
+          stripGenome.querySelectorAll(".strip-segment").forEach(function(seg) {{
+            if (!stripClassificationOn) {{
+              seg.classList.remove("segment-hidden-by-filter");
+            }} else if (sectionVisible) {{
+              var hide = false;
+              if (seg.classList.contains("ia")) hide = !showIa;
+              else if (seg.classList.contains("ib")) hide = !showIb;
+              else if (seg.classList.contains("other-n")) hide = !showOtherAll && !showOtherN;
+              else if (seg.classList.contains("other")) hide = !showOtherAll;
+              seg.classList.toggle("segment-hidden-by-filter", hide);
+            }}
+          }});
+        }}
       }});
     }}
     var bpContainer = document.getElementById("breakpointsStripsContainer");
@@ -1635,23 +1717,27 @@ function exportStripSvg(sectionId, containerId, figTitle, ref1Label, ref2Label) 
       var bpSections = bpContainer.querySelectorAll(".rec-sites-section");
       bpSections.forEach(function(sec) {{
         var ri = sec.getAttribute("data-row");
-        sec.classList.toggle("hidden", !visibleRows.has(ri));
+        sec.classList.toggle("hidden", !rowsForStrips.has(ri));
       }});
     }}
     var countEl = document.getElementById("stripFilterCount");
     if (countEl) {{
-      var n = visibleRows.size;
+      var n = rowsForStrips.size;
       var total = rows.length;
-      if (n < total && total > 0)
+      if (stripClassificationOn)
+        countEl.textContent = "Showing " + n + " of " + total + " samples (filtered by classification).";
+      else if (n < total && total > 0)
         countEl.textContent = "Showing " + n + " of " + total + " samples.";
       else
         countEl.textContent = "";
     }}
     var bpCountEl = document.getElementById("breakpointsFilterCount");
     if (bpCountEl) {{
-      var n = visibleRows.size;
+      var n = rowsForStrips.size;
       var total = rows.length;
-      if (n < total && total > 0)
+      if (stripClassificationOn)
+        bpCountEl.textContent = "Showing " + n + " of " + total + " samples (filtered by classification).";
+      else if (n < total && total > 0)
         bpCountEl.textContent = "Showing " + n + " of " + total + " samples.";
       else
         bpCountEl.textContent = "";
@@ -1668,6 +1754,25 @@ function exportStripSvg(sectionId, containerId, figTitle, ref1Label, ref2Label) 
     recFilterEl.addEventListener("change", applyFilters);
     recFilterEl.addEventListener("input", applyFilters);
   }}
+  var stripFilterCheckEl = document.getElementById("stripClassificationFilterCheck");
+  if (stripFilterCheckEl) {{
+    stripFilterCheckEl.addEventListener("change", function() {{
+      var opts = document.getElementById("stripClassificationOptions");
+      if (opts) opts.setAttribute("aria-hidden", this.checked ? "false" : "true");
+      applyFilters();
+    }});
+  }}
+  document.querySelectorAll(".strip-class-opt").forEach(function(el) {{
+    el.addEventListener("change", function() {{
+      // If any option is turned on, auto-open + check the master filter to make it obvious
+      var anyChecked = document.querySelector(".strip-class-opt:checked") != null;
+      var master = document.getElementById("stripClassificationFilterCheck");
+      var opts = document.getElementById("stripClassificationOptions");
+      if (master) master.checked = anyChecked;
+      if (opts) opts.setAttribute("aria-hidden", anyChecked ? "false" : "true");
+      applyFilters();
+    }});
+  }});
 
   thead.querySelectorAll("th.sortable").forEach(function(th) {{
     var colIndex = parseInt(th.dataset.col, 10);
@@ -2149,13 +2254,13 @@ Examples:
         if not allegiances:
             logger.warning("Query %s: no diagnostic calls", query_id)
             continue
-        n_ia, n_ib, n_other = allegiance_summary(allegiances)
+        n_ia, n_ib, n_other, n_other_n = allegiance_summary(allegiances)
         total = n_ia + n_ib + n_other
         pct_ia = round(100.0 * n_ia / total, 2) if total else 0
         pct_ib = round(100.0 * n_ib / total, 2) if total else 0
         pct_other = round(100.0 * n_other / total, 2) if total else 0
         # SNP-only summary for consensus and deletion present (SNP-based interpretation)
-        n_ia_snp, n_ib_snp, n_other_snp = allegiance_summary_snp_only(allegiances, diagnostic_snp_positions)
+        n_ia_snp, n_ib_snp, n_other_snp, _ = allegiance_summary_snp_only(allegiances, diagnostic_snp_positions)
         total_snp = n_ia_snp + n_ib_snp + n_other_snp
         consensus_snp = consensus_from_snp_percentages(
             n_ia_snp, n_ib_snp, n_other_snp, ref1_label, ref2_label, pct_threshold=10.0
@@ -2170,6 +2275,7 @@ Examples:
             "n_ia": n_ia,
             "n_ib": n_ib,
             "n_other": n_other,
+            "n_other_n": n_other_n,
             "pct_ia": pct_ia,
             "pct_ib": pct_ib,
             "pct_other": pct_other,
