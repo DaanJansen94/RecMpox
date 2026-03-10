@@ -1325,6 +1325,35 @@ def _extract_tracts_as_n_full_length(
     return "".join(c for c in seq if c != "-")
 
 
+def _extract_full_length_non_opposite(
+    aligned_seq: str,
+    allegiances: List[Tuple[int, str]],
+    keep_clade: str,
+) -> str:
+    """
+    Build a full-length (degapped) sequence where positions are kept for a clade
+    whenever they are NOT confidently assigned to the opposite clade.
+
+    keep_clade == "ia": keep any position that is not classified as "ib"
+    keep_clade == "ib": keep any position that is not classified as "ia"
+    Everything else at non-kept positions becomes N. Gaps are removed.
+    """
+    pos_to_all = {p: a for (p, a) in allegiances}
+    seq_out: List[str] = []
+    for idx, b in enumerate(aligned_seq):
+        if b == "-":
+            continue
+        pos = idx + 1
+        a = pos_to_all.get(pos, "other")
+        if keep_clade == "ia":
+            keep = (a != "ib")
+        elif keep_clade == "ib":
+            keep = (a != "ia")
+        else:
+            keep = True
+        seq_out.append(b if keep else "N")
+    return "".join(seq_out)
+
 def _extract_tract_sequences(
     out_dir: Path,
     results: List[dict],
@@ -1378,10 +1407,10 @@ def _extract_tract_sequences(
                 n_skip_no_seq += 1
                 continue
 
-            # ref1 (Ia) file: keep only ia tract bases; Ib + other → N.
-            # ref2 (Ib) file: keep only ib tract bases; Ia + other → N.
+            # ref1 (Ia) file: keep clade I bases and all positions not confidently Ib.
+            # ref2 (Ib) file: keep clade IIb bases and all positions not confidently Ia.
             safe_id = _safe_fasta_id(sample_id)
-            seq1 = _extract_tracts_as_n_full_length(aligned_seq, merged_tracts, keep_clade="ia")
+            seq1 = _extract_full_length_non_opposite(aligned_seq, allegiances, keep_clade="ia")
             len1 = len(seq1)
             non_n1 = sum(1 for b in seq1.upper() if b in "ACGT")
             cov1 = (100.0 * non_n1 / len1) if len1 else 0.0
@@ -1389,7 +1418,7 @@ def _extract_tract_sequences(
             for i in range(0, len1, line_len):
                 fh1.write(seq1[i : i + line_len] + "\n")
 
-            seq2 = _extract_tracts_as_n_full_length(aligned_seq, merged_tracts, keep_clade="ib")
+            seq2 = _extract_full_length_non_opposite(aligned_seq, allegiances, keep_clade="ib")
             len2 = len(seq2)
             non_n2 = sum(1 for b in seq2.upper() if b in "ACGT")
             cov2 = (100.0 * non_n2 / len2) if len2 else 0.0
