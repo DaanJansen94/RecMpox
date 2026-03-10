@@ -19,6 +19,7 @@ recombination breakpoints.
 
 import argparse
 import base64
+import json
 import logging
 import os
 import re
@@ -56,6 +57,13 @@ PHYLOGENY_REFS_FASTA = _REFERENCES_DIR / "mpox_references.fasta"
 ROOT_TREE_FIGURE_R = _REFERENCES_DIR / "root_tree_figure.R"
 
 
+LAPIS_MPOX_DETAILS = "https://lapis.pathoplexus.org/mpox/sample/details"
+PATHOPLEXUS_FASTA = "https://pathoplexus.org/seq"
+MIN_LENGTH_BP = 190_000
+PER_GROUP = 5
+IA_SH2024_MIN_DATE = "2024-08-19"
+
+
 def _safe_fasta_id(raw_id: str) -> str:
     """
     Make a FASTA ID safe for external tools (notably Squirrel), which rejects
@@ -68,6 +76,306 @@ def _safe_fasta_id(raw_id: str) -> str:
     s = re.sub(r"[^A-Za-z0-9_.-]+", "_", s)
     s = re.sub(r"_+", "_", s).strip("_")
     return s or "seq"
+
+
+def _fetch_url_lapis(url: str, params: str = "") -> str:
+    full = f"{url}?{params}" if params else url
+    ctx = ssl.create_default_context()
+    ctx.check_hostname = False
+    ctx.verify_mode = ssl.CERT_NONE
+    req = urllib.request.Request(full, headers={"User-Agent": "RecMpox/1.0"})
+    with urllib.request.urlopen(req, timeout=90, context=ctx) as resp:
+        return resp.read().decode("utf-8")
+
+
+def _lapis_fetch(q: Dict[str, Any], limit: int = 5000) -> List[Dict[str, Any]]:
+    """Fetch from LAPIS details; return list of dicts (raw rows)."""
+    q = dict(q)
+    q["limit"] = limit
+    params = urllib.parse.urlencode(q)
+    try:
+        data = _fetch_url_lapis(LAPIS_MPOX_DETAILS, params)
+        obj = json.loads(data)
+        data_list = obj.get("data") or []
+        return data_list
+    except Exception as e:
+        logger.warning("Pathoplexus LAPIS failed: %s", e)
+        return []
+
+
+def _lapis_row_to_tuple(r: Dict[str, Any], date_key_priority: Optional[List[str]] = None) -> Optional[Tuple[str, str, int, Optional[str]]]:
+    """(accession_version, date_sort_key, length, insdc) or None."""
+    acc_ver = (r.get("accessionVersion") or r.get("accession") or "").strip()
+    length = r.get("length")
+    if not acc_ver or length is None or int(length) < MIN_LENGTH_BP:
+        return None
+    insdc = (r.get("insdcAccessionFull") or "").strip() or None
+    date = None
+    for key in date_key_priority or ["sampleCollectionDate", "sampleCollectionDateRangeLower", "sampleCollectionDateRangeUpper"]:
+        v = r.get(key)
+        if isinstance(v, str) and v.strip():
+            date = v.strip()
+            break
+    if not date:
+        date = "9999-99-99"
+    return (acc_ver, date, int(length), insdc)
+
+
+def _fetch_ib_kinshasa(limit: int = 5000) -> List[Tuple[str, str, int, Optional[str]]]:
+    rows = _lapis_fetch(
+        {
+            "geoLocCountry": "Democratic Republic of the Congo",
+            "geoLocAdmin1": "Kinshasa",
+            "clade": "Ib",
+            "lengthFrom": MIN_LENGTH_BP,
+        },
+        limit=limit,
+    )
+    out: List[Tuple[str, str, int, Optional[str]]] = []
+    for r in rows:
+        t = _lapis_row_to_tuple(r, ["sampleCollectionDate"])
+        if t and t[1] != "9999-99-99":
+            out.append(t)
+    out.sort(key=lambda x: (x[1], x[0]))
+    return out[:PER_GROUP]
+
+
+def _fetch_ia_kinshasa_sh2024(limit: int = 5000) -> List[Tuple[str, str, int, Optional[str]]]:
+    rows = _lapis_fetch(
+        {
+            "geoLocCountry": "Democratic Republic of the Congo",
+            "geoLocAdmin1": "Kinshasa",
+            "clade": "Ia",
+            "outbreak": "sh2024",
+            "lengthFrom": MIN_LENGTH_BP,
+        },
+        limit=limit,
+    )
+    out: List[Tuple[str, str, int, Optional[str]]] = []
+    for r in rows:
+        t = _lapis_row_to_tuple(r, ["sampleCollectionDate"])
+        if t and t[1] != "9999-99-99" and t[1] >= IA_SH2024_MIN_DATE:
+            out.append(t)
+    out.sort(key=lambda x: (x[1], x[0]))
+    return out[:PER_GROUP]
+
+
+def _fetch_sh2017(limit: int = 5000) -> List[Tuple[str, str, int, Optional[str]]]:
+    rows = _lapis_fetch(
+        {
+            "outbreak": "sh2017",
+            "lengthFrom": MIN_LENGTH_BP,
+        },
+        limit=limit,
+    )
+    out: List[Tuple[str, str, int, Optional[str]]] = []
+    for r in rows:
+        t = _lapis_row_to_tuple(r, ["sampleCollectionDate"])
+        if t and t[1] != "9999-99-99":
+            out.append(t)
+    out.sort(key=lambda x: (x[1], x[0]))
+    return out[:PER_GROUP]
+
+
+def _fetch_iia_earliest(limit: int = 5000) -> List[Tuple[str, str, int, Optional[str]]]:
+    rows = _lapis_fetch(
+        {
+            "clade": "IIa",
+            "lengthFrom": MIN_LENGTH_BP,
+        },
+        limit=limit,
+    )
+    seen_base: set = set()
+    out: List[Tuple[str, str, int, Optional[str]]] = []
+    for r in rows:
+        if r.get("versionStatus") != "LATEST_VERSION":
+            continue
+        t = _lapis_row_to_tuple(
+            r,
+            ["sampleCollectionDate", "sampleCollectionDateRangeLower", "sampleCollectionDateRangeUpper"],
+        )
+        if not t:
+            continue
+        base = (t[0].split(".")[0], t[1])
+        if base in seen_base:
+            continue
+        seen_base.add(base)
+        out.append(t)
+    out.sort(key=lambda x: (x[1], x[0]))
+    return out[:PER_GROUP]
+
+
+def _fetch_fasta_pathoplexus(accession_version: str, out_path: Path) -> bool:
+    url = f"{PATHOPLEXUS_FASTA}/{accession_version}.fa"
+    try:
+        data = _fetch_url_lapis(url, "")
+        if not data.strip() or "not found" in data.lower()[:200]:
+            return False
+        out_path.parent.mkdir(parents=True, exist_ok=True)
+        out_path.write_text(data)
+        return True
+    except Exception:
+        return False
+
+
+def _align_consensus_group(combined_fa: Path, out_dir: Path, stem: str, use_clade_ii: bool) -> Optional[Path]:
+    """Run Squirrel (cladei or cladeii) or mafft; return path to alignment file or None."""
+    squirrel_out = out_dir / "squirrel_out" / stem
+    squirrel_out.mkdir(parents=True, exist_ok=True)
+    expected_aln = squirrel_out / (combined_fa.stem + ".aln.fasta")
+    clade = "cladeii" if use_clade_ii else "cladei"
+    try:
+        subprocess.run(
+            ["squirrel", "--clade", clade, str(combined_fa), "-o", str(squirrel_out), "--tempdir", str(squirrel_out / "tmp")],
+            check=True,
+            capture_output=True,
+            text=True,
+            timeout=600,
+        )
+    except FileNotFoundError:
+        pass
+    except subprocess.CalledProcessError:
+        pass
+    if expected_aln.exists():
+        return expected_aln
+    aln_files = list(squirrel_out.glob("*.aln.fasta"))
+    if aln_files:
+        return aln_files[0]
+    try:
+        with open(expected_aln, "w") as out:
+            subprocess.run(
+                ["mafft", "--auto", "--quiet", str(combined_fa)],
+                check=True,
+                stdout=out,
+                text=True,
+                timeout=600,
+            )
+        return expected_aln
+    except (FileNotFoundError, subprocess.CalledProcessError):
+        return None
+
+
+def _build_consensus_from_aln(aln_path: Path, consensus_stem: str) -> Optional[Tuple[str, int]]:
+    """Return (consensus_content_with_header, len_ungapped) or None."""
+    seqs: Dict[str, str] = {}
+    with open(aln_path) as f:
+        current_id: Optional[str] = None
+        current_seq: List[str] = []
+        for line in f:
+            if line.startswith(">"):
+                if current_id is not None:
+                    seqs[current_id] = "".join(current_seq)
+                current_id = line[1:].split()[0].strip().replace("/", "_")
+                current_seq = []
+            else:
+                current_seq.append(line.strip())
+        if current_id is not None:
+            seqs[current_id] = "".join(current_seq)
+    if not seqs:
+        return None
+    aln_len = len(next(iter(seqs.values())))
+    consensus: List[str] = []
+    for col in range(aln_len):
+        counts = {"A": 0, "C": 0, "G": 0, "T": 0, "N": 0, "-": 0}
+        for seq in seqs.values():
+            b = seq[col].upper() if col < len(seq) else "-"
+            if b in counts:
+                counts[b] += 1
+            else:
+                counts["N"] += 1
+        acgt = {k: counts[k] for k in "ACGT"}
+        best = max(acgt.items(), key=lambda x: x[1])
+        total_acgt = sum(acgt.values())
+        if total_acgt == 0:
+            consensus.append("N")
+        elif best[1] > total_acgt / 2:
+            consensus.append(best[0])
+        else:
+            consensus.append("N")
+    consensus_ungapped = "".join(consensus).replace("-", "")
+    body = "\n".join(consensus_ungapped[i : i + 80] for i in range(0, len(consensus_ungapped), 80)) + "\n"
+    header = f">{consensus_stem}\n"
+    return (header + body, len(consensus_ungapped))
+
+
+def _build_lapis_consensus_refs(clades: List[str], consensus_output_dir: Path, work_dir: Path) -> Dict[str, Path]:
+    """
+    Fetch earliest 5 genomes per selected clade from LAPIS/Pathoplexus and build one consensus FASTA per clade.
+    Returns mapping from clade label (Ia/Ib/IIa/IIb) to FASTA path inside consensus_output_dir.
+    """
+    consensus_output_dir.mkdir(parents=True, exist_ok=True)
+    tmp_dir = work_dir / "earliest_consensus_tmp"
+    if tmp_dir.exists():
+        shutil.rmtree(tmp_dir, ignore_errors=True)
+    tmp_dir.mkdir(parents=True, exist_ok=True)
+    try:
+        fasta_dir = tmp_dir / "fasta"
+        fasta_dir.mkdir(parents=True, exist_ok=True)
+
+        all_groups = [
+            ("Ib_Kinshasa", _fetch_ib_kinshasa, "ib_kinshasa", False, "Ib", "sh2023Ib"),
+            ("Ia_Kinshasa_sh2024", _fetch_ia_kinshasa_sh2024, "ia_kinshasa", False, "Ia", "sh2024Ia"),
+            ("sh2017", _fetch_sh2017, "sh2017", True, "IIb", "sh2017IIb"),
+            ("IIa", _fetch_iia_earliest, "iia", True, "IIa", "iia"),
+        ]
+        wanted = set(clades)
+        groups = [g for g in all_groups if g[4] in wanted]
+        if not groups:
+            raise RuntimeError(f"No supported clades selected for consensus build: {clades!r}")
+
+        out_paths: Dict[str, Path] = {}
+        for name, fetch_fn, consensus_stem, use_clade_ii, clade_label, header_stem in groups:
+            logger.info("Consensus refs: fetching %s ...", name)
+            rows = fetch_fn()
+            if len(rows) < 2:
+                logger.warning("Consensus refs: skip %s (need at least 2 samples, got %d)", name, len(rows))
+                continue
+
+            group_fastas: List[Path] = []
+            for acc_ver, date, length, insdc in rows:
+                safe_id = acc_ver.replace(".", "_").replace("/", "_")
+                path = fasta_dir / f"{name}_{safe_id}.fa"
+                if not _fetch_fasta_pathoplexus(acc_ver, path) and insdc:
+                    fetch_nucleotide_fasta(insdc.split(".")[0], path)
+                if path.exists():
+                    group_fastas.append(path)
+            if len(group_fastas) < 2:
+                logger.warning("Consensus refs: skip %s (could not download enough FASTAs)", name)
+                continue
+
+            combined_fa = tmp_dir / f"samples_combined_{consensus_stem}.fa"
+            with open(combined_fa, "w") as out_f:
+                for p in sorted(group_fastas):
+                    text = p.read_text()
+                    out_f.write(text)
+                    if text and not text.endswith("\n"):
+                        out_f.write("\n")
+
+            aln_path = _align_consensus_group(combined_fa, tmp_dir, consensus_stem, use_clade_ii)
+            if not aln_path or not aln_path.exists():
+                logger.warning("Consensus refs: skip %s (alignment failed; install squirrel and/or mafft)", name)
+                continue
+
+            result = _build_consensus_from_aln(aln_path, header_stem)
+            if not result:
+                logger.warning("Consensus refs: skip %s (consensus build failed)", name)
+                continue
+            content, length_bp = result
+            lines = content.split("\n")
+            if lines and lines[0].startswith(">"):
+                lines[0] = f">{header_stem}"
+            content = "\n".join(lines) + ("\n" if content.endswith("\n") else "")
+            out_fa = consensus_output_dir / f"{header_stem}.fa"
+            out_fa.parent.mkdir(parents=True, exist_ok=True)
+            out_fa.write_text(content)
+            logger.info("Consensus refs: wrote %s (length %d bp)", out_fa, length_bp)
+            out_paths[clade_label] = out_fa
+
+        if not out_paths:
+            raise RuntimeError("Consensus refs: no consensus files produced")
+        return out_paths
+    finally:
+        shutil.rmtree(tmp_dir, ignore_errors=True)
 
 
 def _sanitize_fasta_ids(in_path: Path, out_path: Path) -> None:
@@ -2147,30 +2455,21 @@ Examples:
     work_dir.mkdir(parents=True, exist_ok=True)
     setup_logging(args.output, verbose=not args.quiet)
 
-    # When -ref L1,L2: run consensus script (earliest 5 per clade → one consensus per clade) and use those FASTAs as ref1/ref2
+    # When -ref L1,L2: build consensus refs from Pathoplexus (earliest 5 per clade → one consensus per clade) and use those FASTAs as ref1/ref2
     if getattr(args, "ref", None):
         L1 = ref1_g_resolved
         L2 = ref2_g_resolved
         consensus_dir = work_dir / "ref_consensus"
-        consensus_dir.mkdir(parents=True, exist_ok=True)
-        script_path = Path(__file__).resolve().parent / "scripts" / "download_earliest_consensus.py"
-        if not script_path.is_file():
-            logger.error("Consensus script not found: %s", script_path)
+        try:
+            consensus_map = _build_lapis_consensus_refs([L1, L2], consensus_dir, work_dir)
+        except Exception as e:
+            logger.error("Consensus refs: failed to build consensus references from Pathoplexus: %s", e)
             sys.exit(1)
-        cmd = [sys.executable, str(script_path), "--clades", L1, L2, "--out-dir", str(consensus_dir)]
-        logger.info("Building consensus references: %s", " ".join(cmd))
-        rc = subprocess.run(cmd)
-        if rc.returncode != 0:
-            logger.error("Consensus script failed (exit %s)", rc.returncode)
+        if L1 not in consensus_map or L2 not in consensus_map:
+            logger.error("Consensus refs: missing consensus FASTA for %s or %s", L1, L2)
             sys.exit(1)
-        _CONSENSUS_FILENAME = {"Ia": "sh2024Ia.fa", "Ib": "sh2023Ib.fa", "IIa": "iia.fa", "IIb": "sh2017IIb.fa"}
-        p1 = consensus_dir / _CONSENSUS_FILENAME[L1]
-        p2 = consensus_dir / _CONSENSUS_FILENAME[L2]
-        if not p1.is_file() or not p2.is_file():
-            logger.error("Consensus files not produced: %s, %s", p1, p2)
-            sys.exit(1)
-        args.ref1 = str(p1)
-        args.ref2 = str(p2)
+        args.ref1 = str(consensus_map[L1])
+        args.ref2 = str(consensus_map[L2])
 
     ref_ia_path = resolve_ref(args.ref1, work_dir, "1")
     ref_ib_path = resolve_ref(args.ref2, work_dir, "2")
