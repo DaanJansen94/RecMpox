@@ -1419,6 +1419,7 @@ def _extract_tract_sequences(
     alignments_queries: Dict[str, str],
     ref1_label: str,
     ref2_label: str,
+    is_intra_clade: bool,
     min_consecutive: int = 1,
     line_len: int = 80,
     include_indels: bool = False,
@@ -1436,6 +1437,14 @@ def _extract_tract_sequences(
 
     Tract boundaries use all positions in each sample's allegiances (including
     indel columns when -include-indels was used).  Clade labels: ``"ia"`` (ref1), ``"ib"`` (ref2).
+    When is_intra_clade is True (e.g. Ia vs Ib or IIa vs IIb), we keep "all
+    non-opposite" bases for each clade (Ia tract = not Ib; Ib tract = not Ia),
+    so ambiguous/other positions remain in both masked sequences.
+
+    When is_intra_clade is False (inter-clade, e.g. I vs II), we only keep
+    positions confidently assigned to that clade (strict tracts) using
+    _extract_tracts_as_n_full_length, so masked sequences contain only Ia or
+    only Ib tract positions and everything else becomes N.
     """
     out_dir.mkdir(parents=True, exist_ok=True)
     ref1_out = out_dir / f"{ref1_label}_recombinant_ancestral_tract.fa"
@@ -1466,10 +1475,14 @@ def _extract_tract_sequences(
                 n_skip_no_seq += 1
                 continue
 
-            # ref1 (Ia) file: keep clade I bases and all positions not confidently Ib.
-            # ref2 (Ib) file: keep clade IIb bases and all positions not confidently Ia.
             safe_id = _safe_fasta_id(sample_id)
-            seq1 = _extract_full_length_non_opposite(aligned_seq, allegiances, keep_clade="ia")
+            # ref1 (Ia) file
+            if is_intra_clade:
+                # Intra-clade: keep clade Ia bases and all positions not confidently Ib.
+                seq1 = _extract_full_length_non_opposite(aligned_seq, allegiances, keep_clade="ia")
+            else:
+                # Inter-clade: strict Ia tracts only (Ia bases; everything else → N).
+                seq1 = _extract_tracts_as_n_full_length(aligned_seq, merged_tracts, keep_clade="ia")
             len1 = len(seq1)
             non_n1 = sum(1 for b in seq1.upper() if b in "ACGT")
             cov1 = (100.0 * non_n1 / len1) if len1 else 0.0
@@ -1477,7 +1490,13 @@ def _extract_tract_sequences(
             for i in range(0, len1, line_len):
                 fh1.write(seq1[i : i + line_len] + "\n")
 
-            seq2 = _extract_full_length_non_opposite(aligned_seq, allegiances, keep_clade="ib")
+            # ref2 (Ib/IIb) file
+            if is_intra_clade:
+                # Intra-clade: keep clade Ib bases and all positions not confidently Ia.
+                seq2 = _extract_full_length_non_opposite(aligned_seq, allegiances, keep_clade="ib")
+            else:
+                # Inter-clade: strict Ib/IIb tracts only.
+                seq2 = _extract_tracts_as_n_full_length(aligned_seq, merged_tracts, keep_clade="ib")
             len2 = len(seq2)
             non_n2 = sum(1 for b in seq2.upper() if b in "ACGT")
             cov2 = (100.0 * non_n2 / len2) if len2 else 0.0
@@ -3596,6 +3615,7 @@ Examples:
             alignments_queries=alignments_queries,
             ref1_label=ref1_label,
             ref2_label=ref2_label,
+            is_intra_clade=is_intra_clade,
             min_consecutive=int(getattr(args, "breakpoint_min_snps", 1)),
             include_indels=getattr(args, "include_indels", False),
         )
