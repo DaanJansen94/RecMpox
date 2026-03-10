@@ -1380,14 +1380,21 @@ def _extract_tract_sequences(
 
             # ref1 (Ia) file: keep only ia tract bases; Ib + other → N.
             # ref2 (Ib) file: keep only ib tract bases; Ia + other → N.
+            safe_id = _safe_fasta_id(sample_id)
             seq1 = _extract_tracts_as_n_full_length(aligned_seq, merged_tracts, keep_clade="ia")
-            fh1.write(f">{sample_id} {ref1_label}_tracts_only\n")
-            for i in range(0, len(seq1), line_len):
+            len1 = len(seq1)
+            non_n1 = sum(1 for b in seq1.upper() if b in "ACGT")
+            cov1 = (100.0 * non_n1 / len1) if len1 else 0.0
+            fh1.write(f">{safe_id}_{ref1_label}_tract_HC_{cov1:.2f}%\n")
+            for i in range(0, len1, line_len):
                 fh1.write(seq1[i : i + line_len] + "\n")
 
             seq2 = _extract_tracts_as_n_full_length(aligned_seq, merged_tracts, keep_clade="ib")
-            fh2.write(f">{sample_id} {ref2_label}_tracts_only\n")
-            for i in range(0, len(seq2), line_len):
+            len2 = len(seq2)
+            non_n2 = sum(1 for b in seq2.upper() if b in "ACGT")
+            cov2 = (100.0 * non_n2 / len2) if len2 else 0.0
+            fh2.write(f">{safe_id}_{ref2_label}_tract_HC_{cov2:.2f}%\n")
+            for i in range(0, len2, line_len):
                 fh2.write(seq2[i : i + line_len] + "\n")
 
             n_written += 1
@@ -1432,7 +1439,7 @@ def _run_phylogeny_pipeline(
         logger.warning("--phylogeny: extracted tract FASTAs not found (%s, %s); skipping phylogeny.", ref1_fa, ref2_fa)
         return
 
-    # Use only the bundled reference set (no user override)
+    # Use bundled reference set (no clade-based restriction)
     refs_path = PHYLOGENY_REFS_FASTA
     if not refs_path.exists():
         logger.error("--phylogeny: bundled references not found at %s", refs_path)
@@ -1499,13 +1506,15 @@ def _run_phylogeny_pipeline(
         cmd_iqtree = [
             "iqtree",
             "-s", str(aln_in_phylogeny),
-            "-m", "GTR",
             "-bb", "10000",
             "-pre", str(iqtree_prefix),
             "-czb",
         ]
-        if getattr(args, "threads", 1) and int(args.threads) > 1:
+        # Use all available CPUs by default; if user requests >1 threads, honor it.
+        if getattr(args, "threads", None) is not None and int(args.threads) > 1:
             cmd_iqtree.extend(["-nt", str(args.threads)])
+        else:
+            cmd_iqtree.extend(["-nt", "AUTO"])
         logger.info("Running IQ-TREE: %s", " ".join(cmd_iqtree))
         result = subprocess.run(cmd_iqtree, timeout=7200)
         if result.returncode != 0:
