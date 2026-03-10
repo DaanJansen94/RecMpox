@@ -34,6 +34,14 @@ import zipfile
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
+try:
+    # Optional: used only for tree-based ancestor distances when --phylogeny is enabled.
+    from Bio import Phylo  # type: ignore[import-not-found]
+
+    _HAS_BIOPHYLO = True
+except ImportError:
+    _HAS_BIOPHYLO = False
+
 from ._version import __version__
 
 logger = logging.getLogger(__name__)
@@ -373,6 +381,57 @@ def load_alignment_fasta(aln_fasta: Path) -> Dict[str, str]:
         if current_id is not None:
             seqs[current_id] = "".join(seqs[current_id])
     return seqs
+
+
+def _load_tree_and_distances(
+    tree_path: Path,
+) -> Optional[Dict[Tuple[str, str], float]]:
+    """
+    Load Newick tree and return symmetric patristic distances between all tip pairs.
+
+    Distances are keyed by (a, b) with a < b. Requires Bio.Phylo; returns None
+    if Biopython is not available.
+    """
+    if not _HAS_BIOPHYLO:
+        return None
+    try:
+        tree = Phylo.read(str(tree_path), "newick")  # type: ignore[name-defined]
+    except Exception as e:  # pragma: no cover - defensive
+        logger.warning("--phylogeny: could not read treefile %s for ancestor labels: %s", tree_path, e)
+        return None
+    # Midpoint-root if supported; if it fails, continue with original tree.
+    if hasattr(tree, "root_at_midpoint"):
+        try:
+            tree.root_at_midpoint()
+        except Exception:  # pragma: no cover - best-effort
+            pass
+    terminals = list(tree.get_terminals())
+    name_to_clade: Dict[str, Any] = {}
+    for clade in terminals:
+        if getattr(clade, "name", None):
+            name_to_clade[clade.name.strip()] = clade
+    if not name_to_clade:
+        logger.warning("--phylogeny: no tip names found in treefile %s", tree_path)
+        return None
+    dists: Dict[Tuple[str, str], float] = {}
+    names = list(name_to_clade.keys())
+    for i in range(len(names)):
+        for j in range(i + 1, len(names)):
+            a, b = names[i], names[j]
+            try:
+                d = float(tree.distance(name_to_clade[a], name_to_clade[b]))
+            except Exception:  # pragma: no cover - defensive
+                continue
+            dists[(a, b)] = d
+    return dists
+
+
+def _patristic_dist(a: str, b: str, dists: Dict[Tuple[str, str], float]) -> Optional[float]:
+    """Lookup symmetric patristic distance between two tip names."""
+    if a == b:
+        return 0.0
+    key = (a, b) if a < b else (b, a)
+    return dists.get(key)
 
 
 def get_query_allegiance_from_alignment(
@@ -1501,12 +1560,24 @@ def _run_phylogeny_pipeline(
             for i in range(0, len(seq), line_len):
                 out.write(seq[i : i + line_len] + "\n")
         for sid, seq in part1_seqs.items():
-            header = _safe_fasta_id(sid) + f"_{ref1_label}_tracts"
+            # Tract FASTA headers include coverage suffix like
+            # "<safe_sample_id>_<ref1_label>_tract_HC_<cov>%". Recover the base
+            # sample ID so that phylogeny tract IDs can be mapped back to the
+            # per-genome records by stripping the coverage part.
+            base_id = sid
+            cov_suffix = f"_{ref1_label}_tract_HC_"
+            if cov_suffix in base_id:
+                base_id = base_id.split(cov_suffix, 1)[0]
+            header = _safe_fasta_id(base_id) + f"_{ref1_label}_tracts"
             out.write(f">{header}\n")
             for i in range(0, len(seq), line_len):
                 out.write(seq[i : i + line_len] + "\n")
         for sid, seq in part2_seqs.items():
-            header = _safe_fasta_id(sid) + f"_{ref2_label}_tracts"
+            base_id = sid
+            cov_suffix = f"_{ref2_label}_tract_HC_"
+            if cov_suffix in base_id:
+                base_id = base_id.split(cov_suffix, 1)[0]
+            header = _safe_fasta_id(base_id) + f"_{ref2_label}_tracts"
             out.write(f">{header}\n")
             for i in range(0, len(seq), line_len):
                 out.write(seq[i : i + line_len] + "\n")
@@ -1524,6 +1595,92 @@ def _run_phylogeny_pipeline(
     # Single alignment in phylogeny/ (logical name)
     aln_in_phylogeny = phylogeny_dir / "phylogeny_alignment.fasta"
     shutil.copy(expected_aln, aln_in_phylogeny)
+
+    # Compute nearest-reference outbreak labels for each tract from the alignment,
+    # so we can display ancestors in the HTML when --phylogeny is used. When a
+    # treefile is available and Biopython is installed, these labels will later
+    # be refined using patristic distances on the tree topology.
+    try:
+        aln_dict = load_alignment_fasta(aln_in_phylogeny)
+    except Exception as e:
+        logger.warning("--phylogeny: could not load alignment for ancestor labels: %s", e)
+        aln_dict = {}
+
+    if aln_dict:
+        def _outbreak_label_from_header(h: str) -> str:
+            if "sh2024Ia" in h:
+                return "sh2024Ia"
+            if "sh2023Ib" in h:
+                return "sh2023Ib"
+            if "sh2017IIb" in h:
+                return "sh2017IIb"
+            if "_IIa_" in h or h.startswith("AY603973.1_IIa") or h.startswith("AY741551.1_IIa") or h.startswith("MN346699.1_IIa") or h.startswith("PV982292.1_IIa"):
+                return "IIa"
+            if "_Ia_" in h:
+                return "Ia"
+            if "_Ib_" in h:
+                return "Ib"
+            return "other"
+
+        ref_ids = [hid for hid in aln_dict.keys() if not hid.endswith(f"_{ref1_label}_tracts") and not hid.endswith(f"_{ref2_label}_tracts")]
+        tract1_ids = [hid for hid in aln_dict.keys() if hid.endswith(f"_{ref1_label}_tracts")]
+        tract2_ids = [hid for hid in aln_dict.keys() if hid.endswith(f"_{ref2_label}_tracts")]
+
+        ref_outbreak = {rid: _outbreak_label_from_header(rid) for rid in ref_ids}
+
+        def _nearest_outbreak(seq_id: str) -> str:
+            seq = aln_dict.get(seq_id)
+            if not seq:
+                return "other"
+            best_label = "other"
+            best_dist = None
+            for rid in ref_ids:
+                ref_seq = aln_dict.get(rid)
+                if not ref_seq or len(ref_seq) != len(seq):
+                    continue
+                dist = 0
+                n_comp = 0
+                for a, b in zip(seq, ref_seq):
+                    if a == "-" or b == "-":
+                        continue
+                    if a.upper() == "N" or b.upper() == "N":
+                        continue
+                    n_comp += 1
+                    if a.upper() != b.upper():
+                        dist += 1
+                if n_comp == 0:
+                    continue
+                if best_dist is None or dist < best_dist:
+                    best_dist = dist
+                    best_label = ref_outbreak.get(rid, "other")
+            return best_label
+
+        if not hasattr(args, "_phylogeny_ancestors"):
+            args._phylogeny_ancestors = {}
+
+        def _sample_key_from_tract(hid: str, label: str) -> str:
+            suffix = f"_{label}_tracts"
+            return hid[: -len(suffix)] if hid.endswith(suffix) else hid
+
+        for hid in tract1_ids:
+            key = _sample_key_from_tract(hid, ref1_label)
+            anc = _nearest_outbreak(hid)
+            rec = args._phylogeny_ancestors.get(key, {})
+            # Keep both alignment-based and (optionally) tree-based labels; ref1
+            # / ref2 will be overwritten by tree-based labels later when a tree
+            # is available so HTML shows the topology-aware nearest ancestor.
+            rec["ref1_aln"] = anc
+            # Default display = alignment; may be overridden by tree-based label.
+            rec.setdefault("ref1", anc)
+            args._phylogeny_ancestors[key] = rec
+
+        for hid in tract2_ids:
+            key = _sample_key_from_tract(hid, ref2_label)
+            anc = _nearest_outbreak(hid)
+            rec = args._phylogeny_ancestors.get(key, {})
+            rec["ref2_aln"] = anc
+            rec.setdefault("ref2", anc)
+            args._phylogeny_ancestors[key] = rec
 
     # IQ-TREE in work_dir (so only one treefile ends up in phylogeny/)
     iqtree_dir = work_dir / "phylogeny_iqtree"
@@ -1624,6 +1781,49 @@ def _run_phylogeny_pipeline(
                 f.unlink()
             except OSError:
                 pass
+
+    # Optional: refine nearest-ancestor labels using patristic distances on the tree
+    if aln_dict and _HAS_BIOPHYLO and out_tree_path.exists():
+        dists = _load_tree_and_distances(out_tree_path)
+        if dists:
+            logger.info("--phylogeny: refining ancestors using tree topology (patristic distances)")
+
+            def _nearest_outbreak_tree(seq_id: str) -> Optional[str]:
+                best_label: Optional[str] = None
+                best_dist: Optional[float] = None
+                for rid in ref_ids:
+                    d = _patristic_dist(seq_id, rid, dists)
+                    if d is None:
+                        continue
+                    if best_dist is None or d < best_dist:
+                        best_dist = d
+                        best_label = ref_outbreak.get(rid, "other")
+                return best_label
+
+            def _sample_key_from_tract(hid: str, label: str) -> str:
+                suffix = f"_{label}_tracts"
+                return hid[: -len(suffix)] if hid.endswith(suffix) else hid
+
+            for hid in tract1_ids:
+                key = _sample_key_from_tract(hid, ref1_label)
+                anc_tree = _nearest_outbreak_tree(hid)
+                if not anc_tree:
+                    continue
+                rec = args._phylogeny_ancestors.get(key, {})
+                # Preserve alignment-based label, but show tree-based label in HTML.
+                rec["ref1_tree"] = anc_tree
+                rec["ref1"] = anc_tree
+                args._phylogeny_ancestors[key] = rec
+
+            for hid in tract2_ids:
+                key = _sample_key_from_tract(hid, ref2_label)
+                anc_tree = _nearest_outbreak_tree(hid)
+                if not anc_tree:
+                    continue
+                rec = args._phylogeny_ancestors.get(key, {})
+                rec["ref2_tree"] = anc_tree
+                rec["ref2"] = anc_tree
+                args._phylogeny_ancestors[key] = rec
 
     root_label = "midpoint-rooted tree" if midpoint_rooted else "tree (unrooted)"
     if pdf_written:
@@ -1938,6 +2138,9 @@ def _write_results_html(
             '<div class="stat-box"><div class="number">{n_total}</div><div class="label">Diagnostic sites (SNPs only)</div></div>'
         ).format(n_total=n_diagnostic_sites)
     snps_only_note_html = ""
+    # When a phylogeny was run and per-sample ancestor labels are available,
+    # results entries may contain an \"ancestors\" field with \"ref1\" and \"ref2\" labels.
+    has_ancestors = any("ancestors" in r for r in results)
     cols = [
         ("id", "Sample ID", False),
         ("length", "Length (bp)", True),
@@ -1945,9 +2148,14 @@ def _write_results_html(
         (("n_ia", "pct_ia"), f"{ref1_label} (n | %)", True),
         (("n_ib", "pct_ib"), f"{ref2_label} (n | %)", True),
         (("n_other", "pct_other"), "other (n | %)", True),
-        ("consensus_snp", "consensus (SNP)", False),
-        ("recombinant_call", "recombinant", False),
     ]
+    if has_ancestors:
+        cols.append(("ancestors", "ancestors", False))
+    else:
+        cols.append(("consensus_snp", "consensus (SNP)", False))
+    cols.append(
+        ("recombinant_call", "recombinant", False),
+    )
     html_escape = (lambda s: str(s).replace("&", "&amp;").replace("<", "&lt;").replace(">", "&gt;").replace('"', "&quot;"))
     refs_summary_html = ""
     if ref1_spec or ref2_spec:
@@ -2002,10 +2210,26 @@ def _write_results_html(
                     cells.append(f"<td{cls}{title_attr}>{html_escape(display_str)}</td>")
             elif key == "recombinant_call":
                 rec = str(r.get(key, ""))
-                badge_cls = "recombinant-badge potential" if rec == "potential recombinant" else "recombinant-badge no"
+                if rec == "recombinant":
+                    badge_cls = "recombinant-badge recombinant"
+                elif rec == "potential recombinant":
+                    badge_cls = "recombinant-badge potential"
+                else:
+                    badge_cls = "recombinant-badge no"
                 cells.append(f'<td{cls}><span class="{badge_cls}">{html_escape(rec)}</span></td>')
             else:
-                cells.append(f"<td{cls}>{html_escape(str(r.get(key, '')))}</td>")
+                if key == "ancestors":
+                    val = r.get(key, "")
+                    # When phylogeny ancestors are available, we store a small dict
+                    # with "ref1" and "ref2" labels (and optionally *_aln / *_tree).
+                    if isinstance(val, dict):
+                        v1 = val.get("ref1", "")
+                        v2 = val.get("ref2", "")
+                        cells.append(f"<td{cls}>{html_escape(str(v1))} | {html_escape(str(v2))}</td>")
+                    else:
+                        cells.append(f"<td{cls}>{html_escape(str(val))}</td>")
+                else:
+                    cells.append(f"<td{cls}>{html_escape(str(r.get(key, '')))}</td>")
         rec = r.get("recombinant_call", "")
         row_cls = " class=\"recombinant\"" if rec == "potential recombinant" else ""
         rows_html.append(f'<tr data-row="{ri}" data-recombinant="{html_escape(rec)}"{row_cls}>' + "".join(cells) + "</tr>")
@@ -2022,13 +2246,20 @@ def _write_results_html(
         if i == 0:
             filter_cells.append('<td></td>')
         elif key == "recombinant_call":
-            filter_cells.append(
-                '<td><select id="recFilter" class="rec-filter-select">'
-                '<option value="all">All</option>'
-                '<option value="potential recombinant">Potential recombinants only</option>'
-                '<option value="no recombinant">No recombinant only</option>'
-                '</select></td>'
-            )
+            # Three options only: All, recombinant (or potential recombinant when no phylogeny), no recombinant.
+            if has_ancestors:
+                rec_options = (
+                    '<option value="all">All</option>'
+                    '<option value="recombinant">Recombinants only</option>'
+                    '<option value="no recombinant">No recombinants only</option>'
+                )
+            else:
+                rec_options = (
+                    '<option value="all">All</option>'
+                    '<option value="potential recombinant">Potential recombinants only</option>'
+                    '<option value="no recombinant">No recombinants only</option>'
+                )
+            filter_cells.append(f'<td><select id="recFilter" class="rec-filter-select">{rec_options}</select></td>')
         elif not is_num:
             filter_cells.append('<td></td>')
         else:
@@ -2321,6 +2552,7 @@ tr.recombinant {{ }}
 #filterrow input {{ width: 70px; padding: 6px; border: 1px solid #bdc3c7; border-radius: 4px; }}
 #filterrow .rec-filter-select {{ padding: 6px 8px; border: 1px solid #bdc3c7; border-radius: 4px; min-width: 120px; }}
 .recombinant-badge {{ font-size: 0.85em; padding: 2px 8px; border-radius: 4px; font-weight: 500; }}
+.recombinant-badge.recombinant {{ background: #f8d7da; color: #721c24; }}
 .recombinant-badge.potential {{ background: #fff3cd; color: #856404; }}
 .recombinant-badge.no {{ background: #d4edda; color: #155724; }}
 .accession-link {{ color: #1976d2; text-decoration: none; font-weight: 500; }}
@@ -3271,7 +3503,7 @@ Examples:
         deletion_present = (consensus_snp == ref2_label) if consensus_snp != "other" else None
         minor_ref_pct = min(pct_ia, pct_ib)
         recombinant_call = _recombinant_call_minor_pct(n_ia, n_ib, total, minor_threshold)
-        results.append({
+        rec = {
             "id": query_id,
             "length": len(query_seq),
             "n_diagnostic_snps": n_diagnostic_sites,
@@ -3287,22 +3519,41 @@ Examples:
             "minor_ref_pct": minor_ref_pct,
             "recombinant_call": recombinant_call,
             "allegiances": allegiances,
-        })
+        }
+        results.append(rec)
 
+    # TSV header: match main table semantics.
+    has_ancestors = any("ancestors" in r for r in results)
     header_parts = [
         "id", "length", "n_sites", f"n_{ref1_label}", f"n_{ref2_label}", "n_other",
         f"pct_{ref1_label}", f"pct_{ref2_label}", "pct_other",
-        "consensus_SNP", "recombinant_call",
     ]
+    if has_ancestors:
+        header_parts.append("ancestors")
+        header_parts.append("recombinant_call")
+    else:
+        header_parts.append("consensus_SNP")
+        header_parts.append("recombinant_call")
     header = "\t".join(header_parts) + "\n"
 
     def row(r: Dict[str, Any]) -> str:
         parts = [
             r["id"], str(r["length"]), str(r["n_diagnostic_snps"]), str(r["n_ia"]), str(r["n_ib"]), str(r["n_other"]),
             str(r["pct_ia"]), str(r["pct_ib"]), str(r["pct_other"]),
-            r["consensus_snp"], r["recombinant_call"],
         ]
-        return "\t".join(parts) + "\n"
+        if has_ancestors:
+            anc = r.get("ancestors", {})
+            if isinstance(anc, dict):
+                v1 = anc.get("ref1", "")
+                v2 = anc.get("ref2", "")
+                parts.append(f"{v1}|{v2}")
+            else:
+                parts.append(str(anc) if anc is not None else "")
+            parts.append(r["recombinant_call"])
+        else:
+            parts.append(r["consensus_snp"])
+            parts.append(r["recombinant_call"])
+        return "\t".join(str(p) for p in parts) + "\n"
 
     out_tsv = args.output / "recmpox_results.tsv"
     with open(out_tsv, "w") as f:
@@ -3328,10 +3579,6 @@ Examples:
                     f.write(f"{sample_id}\t{pos}\t{label}\n")
         logger.info("Wrote %s (%d potential recombinant samples)", out_sites_tsv, len(rec_samples))
 
-    recombinant_threshold_note = (
-        f"A {minor_threshold:g}% threshold is used for all recombinant calls: "
-        f"when minor ref % ≥ {minor_threshold:g}%, the sample is flagged as potential recombinant."
-    )
     other_explanation = (
         "%% other = diagnostic sites where the query neither matched %s nor %s (different base or gap/N count as other)."
     ) % (ref1_label, ref2_label)
@@ -3356,6 +3603,44 @@ Examples:
     # Optional: phylogeny from refs + two partition FASTAs (requires extract-tracts)
     if getattr(args, "phylogeny", False):
         _run_phylogeny_pipeline(args, work_dir, ref1_label, ref2_label, squirrel_clade)
+        # Attach phylogeny ancestors (if any) to per-genome records for HTML/TSV
+        # and refine recombinant_call based on ancestor mismatch.
+        phy_anc = getattr(args, "_phylogeny_ancestors", None)
+        if phy_anc:
+            for rec in results:
+                sid = rec.get("id")
+                if sid in phy_anc:
+                    rec["ancestors"] = phy_anc[sid]
+            # Refine calls using ancestors:
+            # - If both ancestors are present and identical → no recombinant
+            # - If they are different and the sample passed the % threshold → recombinant
+            for rec in results:
+                anc = rec.get("ancestors")
+                if not isinstance(anc, dict):
+                    continue
+                a1 = anc.get("ref1")
+                a2 = anc.get("ref2")
+                if not (a1 and a2):
+                    continue
+                # Same ancestor on both tracts → treat as non-recombinant regardless of % threshold.
+                if a1 == a2:
+                    rec["recombinant_call"] = "no recombinant"
+                # Different ancestors and previously flagged by % threshold → recombinant.
+                elif rec.get("recombinant_call") == "potential recombinant":
+                    rec["recombinant_call"] = "recombinant"
+
+    # Summary note: when --phylogeny was used and ancestors are present, explain the two-step logic.
+    has_ancestors = any("ancestors" in r for r in results)
+    if has_ancestors:
+        recombinant_threshold_note = (
+            f"Recombinant calls use two steps. (1) A {minor_threshold:g}% minor-ref threshold screens for potential recombinants. "
+            f"(2) With --phylogeny, the inferred ancestors of the two tracts are compared: if they are the same outbreak (overlap), the sample is classified as no recombinant; if they differ, it is classified as recombinant."
+        )
+    else:
+        recombinant_threshold_note = (
+            f"A {minor_threshold:g}% threshold is used for all recombinant calls: "
+            f"when minor ref % ≥ {minor_threshold:g}%, the sample is flagged as potential recombinant."
+        )
 
     # HTML: one file if <= HTML_CHUNK_SIZE genomes, else one file per chunk (written after phylogeny so PDF can be included)
     html_files: List[Path] = []
