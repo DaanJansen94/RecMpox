@@ -1,6 +1,6 @@
 # RecMpox
 
-Current release: **v0.0.3**
+Current release: **v0.0.4**
 
 RecMpox is a command-line tool that **flags potential recombination events** in monkeypox viruses. It does not confirm recombination, but highlights genomes that may be recombinant and warrant further investigation. RecMpox works by detecting regions within a genome that appear to originate from two different parental viruses. Such patterns are not conclusive evidence of recombination, as similar signals can also arise from shared ancestral variation, convergent mutations, mixed populations (e.g., co-infections or laboratory contamination), or sequencing and assembly errors.
 
@@ -10,11 +10,12 @@ RecMpox is a command-line tool that **flags potential recombination events** in 
 2. **Alignment and diagnostic SNPs**: The two reference genomes are aligned using [Squirrel](https://github.com/aineniamh/squirrel), so that the same genomic positions correspond across all sequences. RecMpox then identifies positions where the two references differ at the same coordinates. These positions are defined as diagnostic SNPs, because they distinguish between the reference lineages. Positions where the references are identical are ignored, as they do not provide information for detecting recombination.
 3. **Consensus genome classification**: Your consensus genomes are aligned to the same references. At each diagnostic SNP, the base is classified as matching reference 1, reference 2, or other (e.g., gaps or ambiguous bases).
 4. **Flagging potential recombinants**: If both references contribute at least 10% of the diagnostic positions in a genome, RecMpox flags it as a potential recombinant, since no single lineage clearly dominates.
-5. **Recombination tracts and breakpoints**: By examining the pattern of reference matches along the genome, RecMpox infers recombination tracts and identifies their breakpoints (start and end positions). By default, no consecutive-SNP filtering is applied (minimum run length = 1), but you can ignore single-SNP runs by adding `-breakpoint-snp` (or `-b`), which sets the minimum run length to 2.
-6. **Outputs**:
-   - TSV file: or each genome, reports the number and proportion of diagnostic SNPs matching each reference, the resulting recombinant flag, and summary statistics used for tract inference.
+5. **Recombination tracts and breakpoints**: By examining the pattern of reference matches along the genome, RecMpox infers recombination tracts and identifies their breakpoints (start and end positions).
+6. **Phylogeny of recombinant ancestors** (optional): With `-phylogeny`, RecMpox builds trees from the extracted Ia and Ib tract sequences and infers the nearest outbreak ancestor for each tract, which helps confirm or reject recombination.
+7. **Outputs**:
+   - TSV file: For each genome, reports the number and proportion of diagnostic SNPs matching each reference, the resulting recombinant flag, and summary statistics used for tract inference.
    - Interactive HTML report: Provides sortable tables, summary plots, per-sample visualisations, and genome-wide displays of inferred recombination tracts and breakpoints.
-   - Aligned FASTA: Contains the aligned reference and query sequences used for analysis.
+   - With `-phylogeny`: Phylogeny folder with alignment, midpoint-rooted tree, and PDF/SVG figures; the tree is also included in the HTML report.
 
 ⚠️ **Note**: RecMpox is primarily designed to investigate potential recombination between viruses circulating in sustained human outbreaks (for example, SH2017, SH2023b, and SH2024a). The reference genomes provided by default in the tool correspond to these sustained outbreak lineages. When applying RecMpox outside this context, it is crucial to select reference genomes that are genetically close to your consensus sequences. Using distant or poorly matched references can reduce the interpretability of diagnostic SNPs and may lead to misleading recombinant signals.
 
@@ -77,6 +78,7 @@ conda activate recmpox
 # Use built-in references: consensus of 5 earliest genomes obtained from sustained outbreaks
 recmpox -i fasta/ -o output -ref Ia,Ib -t 4
 recmpox -i fasta/ -o output -ref Ib,IIb -t 4
+recmpox -i fasta/ -o output -ref Ia,Ib -phylogeny
 
 # Input can be: FASTA file, directory of .fa/.fasta/.fna, or NCBI accession(s)
 recmpox -i consensus.fa -o output -ref Ia,Ib
@@ -84,7 +86,7 @@ recmpox -i OZ375330.1 -o output -ref Ib,IIb   # UK recombinant case example
 recmpox -i accessions.txt -o output -ref Ia,Ib   # one accession per line or comma-separated
 ```
 
-**Note**: Either `-ref` (e.g. `Ia,Ib`, `IIa,IIb`, or `Ib,IIb`) or both `-ref1` and `-ref2` are required. With `-ref`, default references are used (Ia=OZ254474.1, Ib=PP601219.1, IIa=OZ287284.1, IIb=NC_063383.1).
+**Note**: Either `-ref` (e.g. `Ia,Ib`, `IIa,IIb`, or `Ib,IIb`) or both `-ref1` and `-ref2` are required. With `-ref`, RecMpox **downloads the earliest 5 genomes per selected clade** (via Pathoplexus) and builds **one consensus reference per clade**, which are then used as `-ref1`/`-ref2` for the run.
 
 ### Command-line options
 
@@ -96,11 +98,11 @@ recmpox -i accessions.txt -o output -ref Ia,Ib   # one accession per line or com
 - `-ref1`, `-ref2`: Custom references (path or NCBI accession). Use with `-ref1_g`/`-ref2_g` for labels (e.g. `-ref1_g Ia -ref2_g Ib`).
 
 #### Optional
-- `-o, --output`: Output directory (default: `output/`)
+- `-o, --output`: Output directory 
 - `-ref1_g`, `-ref2_g`: Genotype labels for TSV/HTML (default from `-ref` or accession)
+- `-m, -MDRF`: **Minor diagnostic recombinant fraction (%)** threshold for calling "potential recombinant" (default: 10). Increase to be more conservative (e.g. 15, 20).
 - `-include-indels`: Include diagnostic indels (default: SNPs only)
 - `-min-indel-size`: Min indel length (bp) when using `-include-indels` (default: 100)
-- `-m, -minor-ref-pct`: Minor reference % threshold for calling "potential recombinant" (default: 10). Increase to be more conservative (e.g. 15, 20).
 - `-t, --threads`: Number of threads
 - `-q, --quiet`: Log to file only
 
@@ -113,8 +115,8 @@ recmpox -i fasta/ -o output -ref1 NC_003310.1 -ref2 PP601219.1 -ref1_g Ia -ref2_
 # Mixed clades (e.g. Ia vs IIb)
 recmpox -i fasta/ -o output -ref1 ACC1 -ref2 ACC2 -ref1_g Ia -ref2_g IIb
 
-# Include diagnostic indels
-recmpox -i fasta/ -o output -ref Ia,Ib -include-indels
+# Phylogeny of recombinant tracts
+recmpox -i fasta/ -o output -ref Ia,Ib -phylogeny
 ```
 
 ## Output files
@@ -124,17 +126,13 @@ recmpox -i fasta/ -o output -ref Ia,Ib -include-indels
 - **potential_recombinants_diagnostic_sites.tsv**: Diagnostic site classification per potential recombinant (when any exist).
 - **diagnostic_snps.txt**: List of diagnostic SNP positions (ref1 vs ref2 alleles).
 - **.recmpox.log**: Log file (in output directory).
-- With **-extract-tracts**: **tracts/** — per-sample FASTA with only Ia tract positions (rest N) and only Ib tract positions (rest N): `Ia_recombinant_ancestral_tract.fa`, `Ib_recombinant_ancestral_tract.fa` (clade names depend on -ref).
-- With **-phylogeny**: **phylogeny/** folder containing **phylogeny_alignment.fasta**, **phylogeny_tree.treefile** (midpoint-rooted), **phylogeny_tree.pdf**, and **phylogeny_tree.svg**. The pipeline runs a bundled R script (requires **ape**, **phytools**, **ggtree**, **ggplot2**). To test the R script on an existing tree (e.g. after a run where the R step failed), from your **output directory** run:
-  ```bash
-  Rscript /path/to/recmpox/references/root_tree_figure.R phylogeny/phylogeny_tree.treefile
-  ```
-  (Replace `/path/to/recmpox` with the RecMpox install or source path; the script writes **rooted.tree**, **tree_figure.pdf**, and **tree_figure.svg** into **phylogeny/**.)
+- With **-phylogeny**: **phylogeny/** folder with **phylogeny_alignment.fasta**, **phylogeny_tree.treefile** (midpoint-rooted), and the tree figure in **phylogeny_tree.pdf** and **phylogeny_tree.svg**.
 
 ## Interpretation
 
 - **No recombinant**: One ref dominates (minor ref &lt; 10% of diagnostic sites).
 - **Potential recombinant**: Both refs contribute ≥10% (minor ref % ≥ 10%). The HTML report shows recombination tracts (beginning/end of each tract) and breakpoints between tracts. A single tract means the genome is entirely one clade (no recombination).
+- **With --phylogeny**: You see the inferred origin of each recombinant tract—which outbreak each ancestral tract is closest to (e.g. sh2017IIb, sh2023Ib).
 - **High pct_other**: Many Ns, gaps, or non-ref bases at diagnostic sites (poor coverage or alignment).
 
 ## HTML Output example
@@ -150,7 +148,7 @@ Also on [**Zenodo**](https://doi.org/10.5281/zenodo.18495962) and [**Docker**](h
 If you use RecMpox in your research, please cite:
 
 ```
-Jansen, D., & Vercauteren, K. RecMpox: A Command-Line Tool for Flagging Potential Recombination Events in Monkeypox Viruses (v0.0.3). Zenodo. https://doi.org/10.5281/zenodo.18495962
+Jansen, D., & Vercauteren, K. RecMpox: A Command-Line Tool for Flagging Potential Recombination Events in Monkeypox Viruses (v0.0.4). Zenodo. https://doi.org/10.5281/zenodo.18495962
 ```
 
 ## Acknowledgements

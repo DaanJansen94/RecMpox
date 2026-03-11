@@ -5,7 +5,7 @@ with open("README.md", "r", encoding="utf-8") as fh:
 
 setup(
     name="recmpox",
-    version="0.0.3",
+    version="0.0.4",
     author="RecMpox contributors",
     description="RecMpox: Classify consensus mpox genomes at diagnostic SNPs (recombinant calling).",
     long_description=long_description,

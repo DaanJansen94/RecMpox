@@ -1527,46 +1527,25 @@ def _load_fasta_dict(path: Path) -> Dict[str, str]:
     return load_alignment_fasta(path)
 
 
-def _run_phylogeny_pipeline(
+def _run_one_phylogeny(
     args: Any,
     work_dir: Path,
     ref1_label: str,
     ref2_label: str,
     squirrel_clade: Optional[str],
-) -> None:
+    refs_seqs: Dict[str, str],
+    part1_seqs: Dict[str, str],
+    part2_seqs: Dict[str, str],
+    phylogeny_dir: Path,
+    work_suffix: str,
+) -> Tuple[Optional[Path], Optional[Path]]:
     """
-    Run phylogeny: merge references + Ia/Ib partition FASTAs, align with Squirrel,
-    run IQ-TREE (GTR, -bb 10000), midpoint-root, then write tree + PDF into output/phylogeny/.
-    All IQ-TREE outputs and the midpoint-rooted treefile + PDF live in output/phylogeny/.
+    Run a single phylogeny: combined FASTA -> Squirrel -> IQ-TREE -> R (midpoint root + PDF).
+    work_suffix is used to avoid clashing when running multiple chunks (e.g. "_1", "_2").
+    Returns (pdf_path, svg_path) for the tree figure.
     """
-    tracts_dir = args.output / "tracts"
-    ref1_fa = tracts_dir / f"{ref1_label}_recombinant_ancestral_tract.fa"
-    ref2_fa = tracts_dir / f"{ref2_label}_recombinant_ancestral_tract.fa"
-    if not ref1_fa.exists() or not ref2_fa.exists():
-        logger.warning("--phylogeny: extracted tract FASTAs not found (%s, %s); skipping phylogeny.", ref1_fa, ref2_fa)
-        return
-
-    # Use bundled reference set (no clade-based restriction)
-    refs_path = PHYLOGENY_REFS_FASTA
-    if not refs_path.exists():
-        logger.error("--phylogeny: bundled references not found at %s", refs_path)
-        sys.exit(1)
-
-    refs_seqs = _load_fasta_dict(refs_path)
-    if not refs_seqs:
-        logger.error("--phylogeny: no sequences in %s", refs_path)
-        sys.exit(1)
-
-    part1_seqs = _load_fasta_dict(ref1_fa)
-    part2_seqs = _load_fasta_dict(ref2_fa)
-    if not part1_seqs or not part2_seqs:
-        logger.warning("--phylogeny: one or both partition FASTAs empty; skipping phylogeny.")
-        return
-
-    # Phylogeny: one alignment + one tree in output/phylogeny/; all intermediates in work_dir (removed later)
-    phylogeny_dir = args.output / "phylogeny"
     phylogeny_dir.mkdir(parents=True, exist_ok=True)
-    combined_fa = work_dir / "phylogeny_combined.fa"
+    combined_fa = work_dir / f"phylogeny_combined{work_suffix}.fa"
     line_len = 80
     seen_ref: Dict[str, int] = {}
     with open(combined_fa, "w") as out:
@@ -1604,14 +1583,14 @@ def _run_phylogeny_pipeline(
     logger.info("Wrote combined FASTA for phylogeny (refs + %s + %s partitions)", ref1_label, ref2_label)
 
     # Squirrel alignment in work_dir
-    squirrel_out_phy = work_dir / "phylogeny_squirrel"
+    squirrel_out_phy = work_dir / f"phylogeny_squirrel{work_suffix}"
     squirrel_out_phy.mkdir(parents=True, exist_ok=True)
     expected_aln = squirrel_out_phy / (combined_fa.stem + ".aln.fasta")
     _run_squirrel(squirrel_clade, combined_fa, squirrel_out_phy, expected_aln)
     if not expected_aln.exists():
         logger.error("--phylogeny: Squirrel did not produce %s", expected_aln)
         sys.exit(1)
-    # Single alignment in phylogeny/ (logical name)
+    # Alignment in phylogeny_dir (logical name)
     aln_in_phylogeny = phylogeny_dir / "phylogeny_alignment.fasta"
     shutil.copy(expected_aln, aln_in_phylogeny)
 
@@ -1701,8 +1680,8 @@ def _run_phylogeny_pipeline(
             rec.setdefault("ref2", anc)
             args._phylogeny_ancestors[key] = rec
 
-    # IQ-TREE in work_dir (so only one treefile ends up in phylogeny/)
-    iqtree_dir = work_dir / "phylogeny_iqtree"
+    # IQ-TREE in work_dir
+    iqtree_dir = work_dir / f"phylogeny_iqtree{work_suffix}"
     iqtree_dir.mkdir(parents=True, exist_ok=True)
     iqtree_prefix = iqtree_dir / "alignment"
     try:
@@ -1849,6 +1828,93 @@ def _run_phylogeny_pipeline(
         print(f"  Phylogeny: {root_label} {out_tree_path}; PDF {pdf_path}")
     else:
         print(f"  Phylogeny: {root_label} {out_tree_path}; PDF not created (would be {pdf_path}; open .treefile in FigTree to export PDF)")
+
+    return (pdf_path if pdf_written else None, svg_path if phylogeny_dir.joinpath("phylogeny_tree.svg").exists() else None)
+
+
+def _run_phylogeny_pipeline(
+    args: Any,
+    work_dir: Path,
+    ref1_label: str,
+    ref2_label: str,
+    squirrel_clade: Optional[str],
+    results: List[Dict[str, Any]],
+) -> None:
+    """
+    Run phylogeny: merge references + Ia/Ib partition FASTAs, align with Squirrel,
+    run IQ-TREE (GTR, -bb 10000), midpoint-root, then write tree + PDF into output/phylogeny/.
+    When there are more than HTML_CHUNK_SIZE genomes, phylogeny is run per chunk (one tree per
+    chunk) so each HTML part gets its own tree and IQ-TREE is not overloaded.
+    """
+    tracts_dir = args.output / "tracts"
+    ref1_fa = tracts_dir / f"{ref1_label}_recombinant_ancestral_tract.fa"
+    ref2_fa = tracts_dir / f"{ref2_label}_recombinant_ancestral_tract.fa"
+    if not ref1_fa.exists() or not ref2_fa.exists():
+        logger.warning("--phylogeny: extracted tract FASTAs not found (%s, %s); skipping phylogeny.", ref1_fa, ref2_fa)
+        return
+
+    refs_path = PHYLOGENY_REFS_FASTA
+    if not refs_path.exists():
+        logger.error("--phylogeny: bundled references not found at %s", refs_path)
+        sys.exit(1)
+
+    refs_seqs = _load_fasta_dict(refs_path)
+    if not refs_seqs:
+        logger.error("--phylogeny: no sequences in %s", refs_path)
+        sys.exit(1)
+
+    part1_all = _load_fasta_dict(ref1_fa)
+    part2_all = _load_fasta_dict(ref2_fa)
+    if not part1_all or not part2_all:
+        logger.warning("--phylogeny: one or both partition FASTAs empty; skipping phylogeny.")
+        return
+
+    def _base_id_from_tract_key(sid: str, label: str) -> str:
+        cov_suffix = f"_{label}_tract_HC_"
+        return sid.split(cov_suffix, 1)[0] if cov_suffix in sid else sid
+
+    def _filter_tract_seqs_by_chunk(seqs: Dict[str, str], label: str, chunk_safe_ids: set) -> Dict[str, str]:
+        return {
+            k: v
+            for k, v in seqs.items()
+            if _base_id_from_tract_key(k, label) in chunk_safe_ids
+        }
+
+    n_results = len(results)
+    pdf_paths: List[Optional[Path]] = []
+    svg_paths: List[Optional[Path]] = []
+
+    if n_results <= HTML_CHUNK_SIZE:
+        # Single phylogeny for all genomes
+        phylogeny_dir = args.output / "phylogeny"
+        pdf_path, svg_path = _run_one_phylogeny(
+            args, work_dir, ref1_label, ref2_label, squirrel_clade,
+            refs_seqs, part1_all, part2_all, phylogeny_dir, work_suffix="",
+        )
+        args._phylogeny_pdf_paths = [pdf_path] if pdf_path else []
+        args._phylogeny_svg_paths = [svg_path] if svg_path else []
+    else:
+        # Chunked: one phylogeny per HTML_CHUNK_SIZE genomes (aligned with HTML parts)
+        chunks = [results[i : i + HTML_CHUNK_SIZE] for i in range(0, n_results, HTML_CHUNK_SIZE)]
+        logger.info("--phylogeny: %d genomes in %d chunks (max %d per tree)", n_results, len(chunks), HTML_CHUNK_SIZE)
+        for part, chunk in enumerate(chunks, start=1):
+            chunk_safe_ids = {_safe_fasta_id(r["id"]) for r in chunk}
+            part1_seqs = _filter_tract_seqs_by_chunk(part1_all, ref1_label, chunk_safe_ids)
+            part2_seqs = _filter_tract_seqs_by_chunk(part2_all, ref2_label, chunk_safe_ids)
+            if not part1_seqs or not part2_seqs:
+                logger.warning("--phylogeny: chunk %d has no tract sequences; skipping tree for part %d", part, part)
+                pdf_paths.append(None)
+                svg_paths.append(None)
+                continue
+            phylogeny_dir = args.output / "phylogeny" / f"phylogeny_{part}"
+            pdf_path, svg_path = _run_one_phylogeny(
+                args, work_dir, ref1_label, ref2_label, squirrel_clade,
+                refs_seqs, part1_seqs, part2_seqs, phylogeny_dir, work_suffix=f"_{part}",
+            )
+            pdf_paths.append(pdf_path)
+            svg_paths.append(svg_path)
+        args._phylogeny_pdf_paths = pdf_paths
+        args._phylogeny_svg_paths = svg_paths
 
 
 def _write_all_sequences_fasta(
@@ -3199,6 +3265,7 @@ def main() -> None:
         epilog="""
 Examples:
   recmpox -i fasta/ -o output -ref Ia,Ib
+  recmpox -i fasta/ -o output -ref Ia,Ib -phylogeny
   recmpox -i OZ375330.1 -o output -ref Ib,IIb  # UK recombinant case example
   recmpox -i accessions.txt -o output -ref Ia,Ib
 
@@ -3214,12 +3281,15 @@ Examples:
     optional.add_argument("-version", action="version", version=f"RecMpox v{__version__}")
     optional.add_argument(
         "-m",
-        "-minor-ref-pct",
+        "-MDRF",
         dest="minor_ref_pct",
         type=float,
         default=MINOR_REF_PCT_THRESHOLD,
         metavar="",
-        help=f"Minor reference %% threshold for calling 'potential recombinant' (default: {MINOR_REF_PCT_THRESHOLD:g})",
+        help=(
+            f"Minor diagnostic recombinant fraction (%%) threshold for calling "
+            f"'potential recombinant' (default: {MINOR_REF_PCT_THRESHOLD:g})"
+        ),
     )
     optional.add_argument(
         "-b",
@@ -3266,7 +3336,7 @@ Examples:
     if getattr(args, "minor_ref_pct", None) is None:
         args.minor_ref_pct = MINOR_REF_PCT_THRESHOLD
     if args.minor_ref_pct < 0 or args.minor_ref_pct > 100:
-        parser.error("-minor-ref-pct must be between 0 and 100")
+        parser.error("Minor diagnostic recombinant fraction (-m / -MDRF) must be between 0 and 100")
     # breakpoint_min_snps is a fixed 1 (default) or 2 (when -b/-breakpoint-snp is used)
 
     if args.input is None:
@@ -3541,38 +3611,44 @@ Examples:
         }
         results.append(rec)
 
-    # TSV header: match main table semantics.
+    # TSV: same columns and format as the HTML results table (exact copy).
     has_ancestors = any("ancestors" in r for r in results)
     header_parts = [
-        "id", "length", "n_sites", f"n_{ref1_label}", f"n_{ref2_label}", "n_other",
-        f"pct_{ref1_label}", f"pct_{ref2_label}", "pct_other",
+        "Sample ID",
+        "Length (bp)",
+        "Diagnostic sites",
+        f"{ref1_label} (n | %)",
+        f"{ref2_label} (n | %)",
+        "other (n | %)",
     ]
     if has_ancestors:
         header_parts.append("ancestors")
-        header_parts.append("recombinant_call")
     else:
-        header_parts.append("consensus_SNP")
-        header_parts.append("recombinant_call")
+        header_parts.append("consensus (SNP)")
+    header_parts.append("recombinant")
     header = "\t".join(header_parts) + "\n"
 
     def row(r: Dict[str, Any]) -> str:
         parts = [
-            r["id"], str(r["length"]), str(r["n_diagnostic_snps"]), str(r["n_ia"]), str(r["n_ib"]), str(r["n_other"]),
-            str(r["pct_ia"]), str(r["pct_ib"]), str(r["pct_other"]),
+            str(r["id"]),
+            str(r["length"]),
+            str(r["n_diagnostic_snps"]),
+            f"{r['n_ia']} | {r['pct_ia']}",
+            f"{r['n_ib']} | {r['pct_ib']}",
+            f"{r['n_other']} | {r['pct_other']}",
         ]
         if has_ancestors:
             anc = r.get("ancestors", {})
             if isinstance(anc, dict):
                 v1 = anc.get("ref1", "")
                 v2 = anc.get("ref2", "")
-                parts.append(f"{v1}|{v2}")
+                parts.append(f"{v1} | {v2}")
             else:
                 parts.append(str(anc) if anc is not None else "")
-            parts.append(r["recombinant_call"])
         else:
-            parts.append(r["consensus_snp"])
-            parts.append(r["recombinant_call"])
-        return "\t".join(str(p) for p in parts) + "\n"
+            parts.append(str(r.get("consensus_snp", "")))
+        parts.append(str(r["recombinant_call"]))
+        return "\t".join(parts) + "\n"
 
     out_tsv = args.output / "recmpox_results.tsv"
     with open(out_tsv, "w") as f:
@@ -3622,7 +3698,7 @@ Examples:
 
     # Optional: phylogeny from refs + two partition FASTAs (requires extract-tracts)
     if getattr(args, "phylogeny", False):
-        _run_phylogeny_pipeline(args, work_dir, ref1_label, ref2_label, squirrel_clade)
+        _run_phylogeny_pipeline(args, work_dir, ref1_label, ref2_label, squirrel_clade, results)
         # Attach phylogeny ancestors (if any) to per-genome records for HTML/TSV
         # and refine recombinant_call based on ancestor mismatch.
         phy_anc = getattr(args, "_phylogeny_ancestors", None)
@@ -3665,8 +3741,14 @@ Examples:
     # HTML: one file if <= HTML_CHUNK_SIZE genomes, else one file per chunk (written after phylogeny so PDF can be included)
     html_files: List[Path] = []
     n_snps = len(diagnostic_snps)
-    phylogeny_pdf = (args.output / "phylogeny" / "phylogeny_tree.pdf") if getattr(args, "phylogeny", False) else None
-    phylogeny_svg = (args.output / "phylogeny" / "phylogeny_tree.svg") if getattr(args, "phylogeny", False) else None
+    phylogeny_pdf_paths: List[Optional[Path]] = getattr(args, "_phylogeny_pdf_paths", [])
+    phylogeny_svg_paths: List[Optional[Path]] = getattr(args, "_phylogeny_svg_paths", [])
+    if len(results) <= HTML_CHUNK_SIZE:
+        phylogeny_pdf = phylogeny_pdf_paths[0] if phylogeny_pdf_paths else None
+        phylogeny_svg = phylogeny_svg_paths[0] if phylogeny_svg_paths else None
+    else:
+        phylogeny_pdf = None
+        phylogeny_svg = None
     phylogeny_pdf_b64: Optional[str] = None
     phylogeny_svg_content: Optional[str] = None
     if phylogeny_pdf and phylogeny_pdf.exists():
@@ -3687,8 +3769,23 @@ Examples:
     else:
         chunks = [results[i:i + HTML_CHUNK_SIZE] for i in range(0, len(results), HTML_CHUNK_SIZE)]
         for part, chunk in enumerate(chunks, start=1):
+            # Use part-specific phylogeny tree (one tree per chunk when > HTML_CHUNK_SIZE)
+            part_pdf = phylogeny_pdf_paths[part - 1] if part - 1 < len(phylogeny_pdf_paths) else None
+            part_svg = phylogeny_svg_paths[part - 1] if part - 1 < len(phylogeny_svg_paths) else None
+            part_pdf_b64: Optional[str] = None
+            part_svg_content: Optional[str] = None
+            if part_pdf and part_pdf.exists():
+                try:
+                    part_pdf_b64 = base64.b64encode(part_pdf.read_bytes()).decode("ascii")
+                except OSError:
+                    pass
+            if part_svg and part_svg.exists():
+                try:
+                    part_svg_content = part_svg.read_text(encoding="utf-8")
+                except OSError:
+                    pass
             out_html = args.output / f"recmpox_results_{part}.html"
-            _write_results_html(out_html, chunk, ref1_label, ref2_label, recombinant_threshold_note, other_explanation, is_intra_clade, minor_threshold, breakpoint_min_consecutive_snps=int(getattr(args, "breakpoint_min_snps", 1)), part_index=part, total_parts=len(chunks), n_diagnostic_snps=n_snps, n_indel_columns=n_indel_columns, ref1_spec=args.ref1, ref2_spec=args.ref2, diagnostic_snp_positions=[p for (p, _, _) in diagnostic_snps], genome_length=ref_len, phylogeny_pdf_path=phylogeny_pdf, phylogeny_pdf_base64=phylogeny_pdf_b64, phylogeny_svg_content=phylogeny_svg_content)
+            _write_results_html(out_html, chunk, ref1_label, ref2_label, recombinant_threshold_note, other_explanation, is_intra_clade, minor_threshold, breakpoint_min_consecutive_snps=int(getattr(args, "breakpoint_min_snps", 1)), part_index=part, total_parts=len(chunks), n_diagnostic_snps=n_snps, n_indel_columns=n_indel_columns, ref1_spec=args.ref1, ref2_spec=args.ref2, diagnostic_snp_positions=[p for (p, _, _) in diagnostic_snps], genome_length=ref_len, phylogeny_pdf_path=part_pdf, phylogeny_pdf_base64=part_pdf_b64, phylogeny_svg_content=part_svg_content)
             html_files.append(out_html)
             logger.info("Wrote %s (%d genomes)", out_html, len(chunk))
         # Index page linking to all parts
