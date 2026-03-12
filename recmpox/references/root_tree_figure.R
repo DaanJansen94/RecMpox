@@ -33,7 +33,47 @@ rooted_path <- file.path(out_dir, "rooted.tree")
 write.tree(tr, rooted_path)
 
 labels <- tr$tip.label
-type <- ifelse(grepl("_tracts", labels, fixed = TRUE), "recombinant", "reference")
+
+# Shorten recombinant tract labels for plotting: keep a 20-char sample ID prefix,
+# the clade label (Ia/Ib/IIa/IIb), and the tract coverage (HC_xx.x) when present.
+shorten_label <- function(x) {
+  if (!grepl("_tract_HC_", x, fixed = TRUE)) {
+    return(x)
+  }
+  clade <- NA_character_
+  split_pat <- NULL
+  if (grepl("_Ia_tract_HC_", x, fixed = TRUE)) {
+    split_pat <- "_Ia_tract_HC_"
+    clade <- "Ia"
+  } else if (grepl("_Ib_tract_HC_", x, fixed = TRUE)) {
+    split_pat <- "_Ib_tract_HC_"
+    clade <- "Ib"
+  } else if (grepl("_IIa_tract_HC_", x, fixed = TRUE)) {
+    split_pat <- "_IIa_tract_HC_"
+    clade <- "IIa"
+  } else if (grepl("_IIb_tract_HC_", x, fixed = TRUE)) {
+    split_pat <- "_IIb_tract_HC_"
+    clade <- "IIb"
+  } else {
+    return(x)
+  }
+  parts <- strsplit(x, split_pat, fixed = TRUE)[[1]]
+  base <- parts[1]
+  cov <- if (length(parts) >= 2) parts[2] else ""
+  base_short <- substr(base, 1, 20)
+  cov_clean <- gsub("[^0-9.]", "", cov)
+  if (nzchar(cov_clean)) {
+    cov_id <- gsub("\\.", "_", cov_clean)
+    return(paste0(base_short, "_", clade, "_tract_HC_", cov_id))
+  } else {
+    return(paste0(base_short, "_", clade, "_tract"))
+  }
+}
+labels <- vapply(labels, shorten_label, character(1))
+# Use shortened labels in the tree so PDF/SVG and any downstream plot show them
+tr$tip.label <- labels
+
+type <- ifelse(grepl("_tract_HC_", labels, fixed = TRUE), "recombinant", "reference")
 clade <- rep("Ia", length(labels))
 clade[type == "recombinant"] <- "Recombinant"
 clade[grepl("sh2024Ib", labels, fixed = TRUE)] <- "sh2024Ib"

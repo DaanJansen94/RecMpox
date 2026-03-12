@@ -1558,24 +1558,14 @@ def _run_one_phylogeny(
             for i in range(0, len(seq), line_len):
                 out.write(seq[i : i + line_len] + "\n")
         for sid, seq in part1_seqs.items():
-            # Tract FASTA headers include coverage suffix like
-            # "<safe_sample_id>_<ref1_label>_tract_HC_<cov>%". Recover the base
-            # sample ID so that phylogeny tract IDs can be mapped back to the
-            # per-genome records by stripping the coverage part.
-            base_id = sid
-            cov_suffix = f"_{ref1_label}_tract_HC_"
-            if cov_suffix in base_id:
-                base_id = base_id.split(cov_suffix, 1)[0]
-            header = _safe_fasta_id(base_id) + f"_{ref1_label}_tracts"
+            # Use tract FASTA headers (which already encode sample, clade and coverage)
+            # but sanitize them for downstream tools (e.g. remove '%' characters).
+            header = _safe_fasta_id(sid)
             out.write(f">{header}\n")
             for i in range(0, len(seq), line_len):
                 out.write(seq[i : i + line_len] + "\n")
         for sid, seq in part2_seqs.items():
-            base_id = sid
-            cov_suffix = f"_{ref2_label}_tract_HC_"
-            if cov_suffix in base_id:
-                base_id = base_id.split(cov_suffix, 1)[0]
-            header = _safe_fasta_id(base_id) + f"_{ref2_label}_tracts"
+            header = _safe_fasta_id(sid)
             out.write(f">{header}\n")
             for i in range(0, len(seq), line_len):
                 out.write(seq[i : i + line_len] + "\n")
@@ -1620,9 +1610,11 @@ def _run_one_phylogeny(
                 return "Ib"
             return "other"
 
-        ref_ids = [hid for hid in aln_dict.keys() if not hid.endswith(f"_{ref1_label}_tracts") and not hid.endswith(f"_{ref2_label}_tracts")]
-        tract1_ids = [hid for hid in aln_dict.keys() if hid.endswith(f"_{ref1_label}_tracts")]
-        tract2_ids = [hid for hid in aln_dict.keys() if hid.endswith(f"_{ref2_label}_tracts")]
+        # Partition alignment IDs into references vs tract sequences for ref1/ref2.
+        tract1_ids = [hid for hid in aln_dict.keys() if f"_{ref1_label}_tract_HC_" in hid]
+        tract2_ids = [hid for hid in aln_dict.keys() if f"_{ref2_label}_tract_HC_" in hid]
+        tract_ids = set(tract1_ids) | set(tract2_ids)
+        ref_ids = [hid for hid in aln_dict.keys() if hid not in tract_ids]
 
         ref_outbreak = {rid: _outbreak_label_from_header(rid) for rid in ref_ids}
 
@@ -1657,8 +1649,10 @@ def _run_one_phylogeny(
             args._phylogeny_ancestors = {}
 
         def _sample_key_from_tract(hid: str, label: str) -> str:
-            suffix = f"_{label}_tracts"
-            return hid[: -len(suffix)] if hid.endswith(suffix) else hid
+            # Tract IDs contain coverage like "<safe_id>_<label>_tract_HC_<cov>".
+            # Recover the base sample ID by stripping the coverage suffix.
+            cov_suffix = f"_{label}_tract_HC_"
+            return hid.split(cov_suffix, 1)[0] if cov_suffix in hid else hid
 
         for hid in tract1_ids:
             key = _sample_key_from_tract(hid, ref1_label)
@@ -1799,8 +1793,8 @@ def _run_one_phylogeny(
                 return best_label
 
             def _sample_key_from_tract(hid: str, label: str) -> str:
-                suffix = f"_{label}_tracts"
-                return hid[: -len(suffix)] if hid.endswith(suffix) else hid
+                cov_suffix = f"_{label}_tract_HC_"
+                return hid.split(cov_suffix, 1)[0] if cov_suffix in hid else hid
 
             for hid in tract1_ids:
                 key = _sample_key_from_tract(hid, ref1_label)
