@@ -14,7 +14,6 @@ build:
   noarch: python
   entry_points:
     - recmpox=recmpox.recmpox:main
-    - rempox=recmpox.recmpox:main
   script:
     - "{{ PYTHON }} -m pip install . --no-deps --no-build-isolation -vvv"
     - mkdir -p $PREFIX/etc/conda/activate.d
@@ -47,8 +46,8 @@ test:
 
 about:
   home: https://github.com/DaanJansen94/RecMpox
-  license: GPL-3.0-or-later
-  license_family: GPL
+  license: MIT
+  license_family: MIT
   license_file: LICENSE
   summary: RecMpox flags potential recombination events in monkeypox consensus genomes.
   description: |

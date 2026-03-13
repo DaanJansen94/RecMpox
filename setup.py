@@ -7,7 +7,7 @@ setup(
     name="recmpox",
     version="0.0.5",
     author="RecMpox contributors",
-    description="RecMpox: Classify consensus mpox genomes at diagnostic SNPs (recombinant calling).",
+    description="RecMpox: A command-line tool to flag potential mpox recombinants from consensus genomes.",
     long_description=long_description,
     long_description_content_type="text/markdown",
     packages=find_packages(),
@@ -17,7 +17,6 @@ setup(
     entry_points={
         "console_scripts": [
             "recmpox=recmpox.recmpox:main",
-            "rempox=recmpox.recmpox:main",
         ],
     },
     classifiers=[
