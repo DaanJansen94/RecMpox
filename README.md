@@ -63,10 +63,11 @@ conda activate recmpox
 
 2. Re-installation (when updates are available):
    ```bash
-   conda activate RecMpox  # Make sure you're in the right environment
+   conda activate recmpox  # Make sure you're in the right environment
    cd RecMpox
    git pull  # Get the latest updates from GitHub
-   pip uninstall RecMpox
+   conda env update -n recmpox -f environment-recmpox.yml --prune
+   pip uninstall -y recmpox
    pip install .
    ```
    
