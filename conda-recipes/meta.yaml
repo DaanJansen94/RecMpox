@@ -7,7 +7,7 @@ package:
 
 source:
   url: https://github.com/DaanJansen94/RecMpox/archive/v{{ version }}.tar.gz
-  sha256: 7e197dde7fc365a7421560e98e9c3783da751df324af74213c80a804d52d1008
+  sha256: 4d8355c7e31d2ced9762fe9a2cf378a69e0c8e5f733bc51bd567ac1bbb0c0f26
 
 build:
   number: 0
