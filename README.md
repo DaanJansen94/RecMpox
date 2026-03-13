@@ -1,6 +1,6 @@
 # RecMpox
 
-Current release: **v0.0.4**
+Current release: **v0.0.5**
 
 RecMpox is a command-line tool that **flags potential recombination events** in monkeypox viruses. It does not confirm recombination, but highlights genomes that may be recombinant and warrant further investigation. RecMpox works by detecting regions within a genome that appear to originate from two different parental viruses. Such patterns are not conclusive evidence of recombination, as similar signals can also arise from shared ancestral variation, convergent mutations, mixed populations (e.g., co-infections or laboratory contamination), or sequencing and assembly errors.
 
@@ -151,7 +151,7 @@ Also on [**Zenodo**](https://doi.org/10.5281/zenodo.18495962) and [**Docker**](h
 If you use RecMpox in your research, please cite:
 
 ```
-Jansen, D., & Vercauteren, K. RecMpox: A Command-Line Tool for Flagging Potential Recombination Events in Monkeypox Viruses (v0.0.4). Zenodo. https://doi.org/10.5281/zenodo.18495962
+Jansen, D., & Vercauteren, K. RecMpox: A Command-Line Tool for Flagging Potential Recombination Events in Monkeypox Viruses (v0.0.5). Zenodo. https://doi.org/10.5281/zenodo.18495962
 ```
 
 ## Acknowledgements

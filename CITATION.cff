@@ -9,7 +9,7 @@ authors:
     orcid: https://orcid.org/0000-0003-1472-9938
 doi: "10.5281/zenodo.18495962"
 title: "RecMpox: A Command-Line Tool for Flagging Potential Recombination Events in Monkeypox Viruses"
-version: v0.0.4
+version: v0.0.5
 url: github.com/DaanJansen94/RecMpox
 date-released: 2026-02-02
 abstract: "RecMpox flags potential recombination events in mpox consensus genomes and reveals locations of recombination breakpoints."
