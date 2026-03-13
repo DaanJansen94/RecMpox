@@ -104,6 +104,8 @@ recmpox -i accessions.txt -o output -ref Ia,Ib   # one accession per line or com
 - `-m, -MDRF`: **Minor diagnostic recombinant fraction (%)** threshold for calling "potential recombinant" (default: 10). Increase to be more conservative (e.g. 15, 20).
 - `-include-indels`: Include diagnostic indels (default: SNPs only)
 - `-min-indel-size`: Min indel length (bp) when using `-include-indels` (default: 100)
+- `-extract-tracts`: Split recombinant genomes by ancestry
+- `-phylogeny`: Phylogeny of recombinant ancestors
 - `-t, --threads`: Number of threads
 - `-q, --quiet`: Log to file only
 
