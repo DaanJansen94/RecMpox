@@ -7,7 +7,7 @@ package:
 
 source:
   url: https://github.com/DaanJansen94/RecMpox/archive/v{{ version }}.tar.gz
-  sha256: 064296b7b775d52e66c47af61984483671d3971cacddaa9d7c091cc6417ef5ca
+  sha256: 7e197dde7fc365a7421560e98e9c3783da751df324af74213c80a804d52d1008
 
 build:
   number: 0
@@ -55,10 +55,10 @@ about:
     RecMpox is a command-line tool that flags potential recombination events in monkeypox viruses.
     It identifies recombination tract breakpoints within your own provided consensus genomes.
     It does not confirm recombination; it flags genomes that may be recombinant for further investigation.
-    RecMpox takes two references (e.g. Clade Ia vs Ib, or IIa vs IIb), aligns them with Squirrel,
-    finds diagnostic SNP positions where the references differ, then classifies each consensus genome
-    at those positions. Genomes where both refs contribute at least 10% are flagged as potential
-    recombinants. Recombination tracts and breakpoints are inferred along the genome.
+    RecMpox takes two references (e.g. Clade Ia vs Ib, or IIa vs IIb), aligns them, finds diagnostic sites,
+    and classifies each genome along the alignment to infer recombination tracts and breakpoints.
+    Optionally, RecMpox can build a phylogeny of the inferred tract sequences alongside outbreak references,
+    to help confirm true recombination and reduce false positives caused by ancestral population structure.
   doc_url: https://github.com/DaanJansen94/RecMpox/blob/main/README.md
   dev_url: https://github.com/DaanJansen94/RecMpox
 
