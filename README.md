@@ -1,6 +1,6 @@
 # RecMpox
 
-Current release: **v0.0.5** (conda package still being tested, use this source code for now)
+Current release: **v0.0.5** 
 
 RecMpox is a command-line tool that **flags potential recombination events** in monkeypox viruses. It does not confirm recombination, but highlights genomes that may be recombinant and warrant further investigation. RecMpox works by detecting regions within a genome that appear to originate from two different parental viruses. Such patterns are not conclusive evidence of recombination, as similar signals can also arise from shared ancestral variation, convergent mutations, mixed populations (e.g., co-infections or laboratory contamination), or sequencing and assembly errors.
 
