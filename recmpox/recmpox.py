@@ -1684,6 +1684,8 @@ def _run_one_phylogeny(
         cmd_iqtree = [
             "iqtree",
             "-s", str(aln_in_phylogeny),
+            # Always use the default GTR substitution model; do not run model selection.
+            "-m", "GTR",
             "-bb", "10000",
             "-pre", str(iqtree_prefix),
             "-czb",
