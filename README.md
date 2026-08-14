@@ -142,7 +142,7 @@ recmpox -i fasta/ -o output -ref Ia,Ib -phylogeny
 
 Example HTML output for one sample:
 
-![HTML Output Example](html_example.png)
+![HTML Output Example](html_example1.png)
 
 Also on [**Zenodo**](https://doi.org/10.5281/zenodo.18495962) and [**Docker**](https://hub.docker.com/repository/docker/daanjansen94/recmpox/general).
 
